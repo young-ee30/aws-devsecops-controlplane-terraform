@@ -5,7 +5,7 @@ GitHub Actions + Terraform으로 인프라와 앱 배포를 자동화합니다.
 
 ---
 
-## 프로젝트 구조
+## 테라폼 구조
 
 ```
 my-devsecops-platform/
