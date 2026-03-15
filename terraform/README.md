@@ -1,7 +1,6 @@
-# my-devsecops-platform
+# 테라폼 구조 및 상세 설명
 
-AWS ECS Fargate 기반 멀티 서비스 배포 플랫폼.
-GitHub Actions + Terraform으로 인프라와 앱 배포를 자동화합니다.
+테라폼 구조를 비롯해서 관련 폴더 및 파일에 대한 보다 자세한 설명입니다.
 
 ---
 
