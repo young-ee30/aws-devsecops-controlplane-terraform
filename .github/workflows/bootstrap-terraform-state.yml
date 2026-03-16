@@ -36,6 +36,7 @@ jobs:
         working-directory: terraform/bootstrap
     env:
       EXISTING_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      PROJECT_NAME: ${{ inputs.project_name || env.DEFAULT_PROJECT_NAME }}
 
     steps:
       - name: Checkout code
@@ -51,20 +52,39 @@ jobs:
         id: existing
         shell: bash
         run: |
-          if [ -z "$EXISTING_STATE_BUCKET" ]; then
+          if [ -n "$EXISTING_STATE_BUCKET" ]; then
+            if aws s3api head-bucket --bucket "$EXISTING_STATE_BUCKET" >/dev/null 2>&1; then
+              echo "bucket_name=$EXISTING_STATE_BUCKET" >> "$GITHUB_OUTPUT"
+              echo "needs_bootstrap=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "TF_STATE_BUCKET is set to '$EXISTING_STATE_BUCKET', but the bucket does not exist." >&2
+            exit 1
+          fi
+
+          PREFIX="${PROJECT_NAME}-tfstate-"
+          MATCH_COUNT=$(aws s3api list-buckets \
+            --query "length(Buckets[?starts_with(Name, '${PREFIX}')])" \
+            --output text)
+
+          if [ "$MATCH_COUNT" = "0" ]; then
             echo "bucket_name=" >> "$GITHUB_OUTPUT"
             echo "needs_bootstrap=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if aws s3api head-bucket --bucket "$EXISTING_STATE_BUCKET" >/dev/null 2>&1; then
-            echo "bucket_name=$EXISTING_STATE_BUCKET" >> "$GITHUB_OUTPUT"
-            echo "needs_bootstrap=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          LATEST_BUCKET=$(aws s3api list-buckets \
+            --query "reverse(sort_by(Buckets[?starts_with(Name, '${PREFIX}')], &CreationDate))[0].Name" \
+            --output text)
+
+          if [ "$MATCH_COUNT" != "1" ]; then
+            echo "Found $MATCH_COUNT existing Terraform state buckets with prefix '${PREFIX}'. Reusing the most recent bucket: $LATEST_BUCKET"
           fi
 
-          echo "TF_STATE_BUCKET is set to '$EXISTING_STATE_BUCKET', but the bucket does not exist." >&2
-          exit 1
+          echo "bucket_name=$LATEST_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "needs_bootstrap=false" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Setup Terraform
         if: steps.existing.outputs.needs_bootstrap == 'true'

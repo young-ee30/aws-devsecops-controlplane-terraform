@@ -90,7 +90,7 @@
 - 워크플로우 안에서는 이 값을 `TF_VAR_db_password` 환경변수로 매핑합니다.
 - Terraform은 `TF_VAR_<변수명>` 규칙에 따라 이를 자동으로 `var.db_password`로 읽습니다.
 - `TF_STATE_BUCKET` repository variable이 없어도, `devsecops-tfstate-` prefix로 S3 버킷을 자동 찾도록 되어 있습니다.
-- 버킷이 여러 개면 어떤 버킷을 써야 할지 애매하므로, 그 경우에는 `TF_STATE_BUCKET`을 수동으로 지정해야 합니다.
+- 버킷이 여러 개면 가장 최근에 생성된 버킷을 자동으로 재사용합니다.
 
 ### `deploy-node-api-ecs.yml`
 
@@ -153,7 +153,8 @@
 설명:
 - `TF_STATE_BUCKET`은 필수는 아닙니다.
 - 값이 없으면 Terraform 워크플로우가 `devsecops-tfstate-` prefix로 S3 버킷을 자동 찾습니다.
-- 같은 prefix 버킷이 여러 개일 때는 이 값을 수동으로 넣어 특정 버킷을 고정하면 됩니다.
+- 같은 prefix 버킷이 여러 개일 때는 가장 최근에 생성된 버킷을 자동으로 사용합니다.
+- 특정 버킷을 강제로 고정하고 싶을 때만 `TF_STATE_BUCKET`을 수동으로 넣으면 됩니다.
 
 ## 4. 상황별로 어떻게 동작하나
 
