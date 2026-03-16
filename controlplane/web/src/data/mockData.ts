@@ -1,5 +1,20 @@
+export type TrendDirection = 'up' | 'down'
+export type PipelineStatus = 'success' | 'failed' | 'running'
+export type PolicyStatus = 'active' | 'draft' | 'paused'
+
+export interface PolicyTemplate {
+  id: string
+  name: string
+  description: string
+  source: string
+  checks: number
+  status: PolicyStatus
+  lastUpdated: string
+  yaml: string
+}
+
 // 앱/HTTP 모니터링 데이터
-export const rpsData = [
+export const rpsData: Array<{ endpoint: string; rps: number; trend: TrendDirection }> = [
   { endpoint: '/api/users', rps: 110.6, trend: 'up' },
   { endpoint: '/api/orders', rps: 62.3, trend: 'down' },
   { endpoint: '/api/auth', rps: 36.3, trend: 'down' },
@@ -114,7 +129,17 @@ export const rdsConnectionData = Array.from({ length: 30 }, (_, i) => ({
 }))
 
 // CI/CD 및 Git Actions 데이터
-export const pipelineData = [
+export const pipelineData: Array<{
+  id: string
+  name: string
+  status: PipelineStatus
+  description: string
+  branch: string
+  commit: string
+  duration: string
+  time: string
+  author: string
+}> = [
   {
     id: '1',
     name: 'CI — Build & Test',
@@ -202,3 +227,81 @@ export const securityScanLog = {
     }
   ]
 }
+
+export const policySummary = [
+  { label: '등록 정책', value: 3, tone: 'blue' },
+  { label: '활성 정책', value: 2, tone: 'green' },
+  { label: '총 검사 규칙', value: 238, tone: 'slate' },
+]
+
+export const policyTemplates: PolicyTemplate[] = [
+  {
+    id: 'policy-1',
+    name: 'CIS AWS Benchmark v1.4',
+    description: 'AWS 계정과 네트워크 리소스를 CIS 기준으로 점검하는 정책입니다.',
+    source: 'CIS_AWS_Benchmark_v1.4.pdf',
+    checks: 128,
+    status: 'active',
+    lastUpdated: '10분 전',
+    yaml: `name: "cis-aws-benchmark"
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          framework: terraform,cloudformation
+          check: CKV_AWS_2,CKV_AWS_8,CKV_AWS_18
+`,
+  },
+  {
+    id: 'policy-2',
+    name: 'OWASP Top 10 IaC',
+    description: '애플리케이션 배포 전에 주요 IaC 취약 구성을 우선 탐지하는 정책입니다.',
+    source: 'OWASP_Top10_IaC.pdf',
+    checks: 47,
+    status: 'active',
+    lastUpdated: '2시간 전',
+    yaml: `name: "owasp-top10-iac"
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          framework: kubernetes,terraform
+          soft_fail: false
+`,
+  },
+  {
+    id: 'policy-3',
+    name: 'KISA 클라우드 보안 가이드',
+    description: '클라우드 운영 환경의 기본 보안 통제 항목을 점검하는 정책입니다.',
+    source: 'KISA_Cloud_Security.pdf',
+    checks: 63,
+    status: 'draft',
+    lastUpdated: '대기 중',
+    yaml: `name: "kisa-cloud-security"
+on:
+  pull_request:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: checkov -d . --framework terraform --output cli
+`,
+  },
+]

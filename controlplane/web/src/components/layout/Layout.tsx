@@ -8,7 +8,9 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
   '/infra': { title: '인프라 세부 모니터링', breadcrumb: ['인프라 세부 모니터링'] },
   '/aws-resource': { title: 'AWS 리소스 모니터링', breadcrumb: ['AWS 리소스 모니터링'] },
   '/security': { title: '보안 점검', breadcrumb: ['보안 점검'] },
+  '/cicd': { title: 'CI / CD', breadcrumb: ['CI / CD'] },
   '/git-actions': { title: 'GitHub Actions 로그', breadcrumb: ['GitHub Actions 로그'] },
+  '/policy': { title: '보안 정책', breadcrumb: ['보안 정책'] },
 }
 
 export default function Layout() {
@@ -18,12 +20,12 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen bg-gray-50">
-      <Sidebar 
-        collapsed={sidebarCollapsed} 
-        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} 
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
       <div className="flex-1 flex flex-col overflow-hidden">
-        <Header 
+        <Header
           title={meta.title}
           breadcrumb={meta.breadcrumb}
         />

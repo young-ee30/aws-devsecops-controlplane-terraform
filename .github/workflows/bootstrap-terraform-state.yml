@@ -6,6 +6,7 @@ on:
     paths:
       - "terraform/**"
       - "services/ecommerce-app-node/**"
+      - "services/frontend/ecommerce-app-frontend/frontend/**"
       - ".github/workflows/**"
   workflow_dispatch:
     inputs:

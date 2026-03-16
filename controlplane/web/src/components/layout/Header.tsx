@@ -8,6 +8,10 @@ interface HeaderProps {
 }
 
 export default function Header({ title, subtitle, breadcrumb = [], lastUpdated }: HeaderProps) {
+  void title
+  void subtitle
+  void lastUpdated
+
   const currentTime = new Date().toLocaleString('ko-KR', {
     year: 'numeric',
     month: 'numeric',
@@ -63,6 +67,8 @@ interface PageHeaderProps {
 }
 
 export function PageHeader({ title, subtitle, lastUpdated, onRefresh }: PageHeaderProps) {
+  void onRefresh
+
   return (
     <div className="flex items-start justify-between mb-6">
       <div>

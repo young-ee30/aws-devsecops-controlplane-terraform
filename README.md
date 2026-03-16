@@ -7,6 +7,7 @@ my-devsecops-platform/
 │   └── workflows/
 │       ├── bootstrap-terraform-state.yml
 │       │                           # Terraform state S3 버킷 1회 생성/재사용
+│       ├── deploy-frontend-ecs.yml # 프론트엔드 이미지 빌드 → ECR push → ECS 배포
 │       ├── deploy-node-api-ecs.yml # 서비스 코드 변경 시 자동 실행
 │       │                           # Docker 빌드 → ECR push → ECS 롤링 배포
 │       ├── terraform-dev-plan-apply.yml
