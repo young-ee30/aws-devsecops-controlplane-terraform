@@ -24,8 +24,6 @@ permissions:
 
 env:
   TF_VERSION: "1.11.0"
-  DEFAULT_AWS_REGION: ap-northeast-2
-  DEFAULT_PROJECT_NAME: devsecops
 
 jobs:
   bootstrap-state:
@@ -36,7 +34,7 @@ jobs:
         working-directory: terraform/bootstrap
     env:
       EXISTING_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-      PROJECT_NAME: ${{ inputs.project_name || env.DEFAULT_PROJECT_NAME }}
+      PROJECT_NAME: ${{ inputs.project_name || 'devsecops' }}
 
     steps:
       - name: Checkout code
@@ -46,7 +44,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ inputs.aws_region || env.DEFAULT_AWS_REGION }}
+          aws-region: ${{ inputs.aws_region || 'ap-northeast-2' }}
 
       - name: Reuse existing state bucket if configured
         id: existing
@@ -100,8 +98,8 @@ jobs:
         if: steps.existing.outputs.needs_bootstrap == 'true'
         run: >
           terraform apply -auto-approve -input=false
-          -var="aws_region=${{ inputs.aws_region || env.DEFAULT_AWS_REGION }}"
-          -var="project_name=${{ inputs.project_name || env.DEFAULT_PROJECT_NAME }}"
+          -var="aws_region=${{ inputs.aws_region || 'ap-northeast-2' }}"
+          -var="project_name=${{ inputs.project_name || 'devsecops' }}"
 
       - name: Capture created bucket name
         if: steps.existing.outputs.needs_bootstrap == 'true'
