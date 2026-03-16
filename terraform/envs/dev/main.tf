@@ -8,6 +8,48 @@ locals {
     }
   }
 
+  # =============================================================
+  # 서비스별 DB 환경변수
+  # RDS 엔드포인트는 apply 후 확정되므로 locals에서 module 참조
+  # =============================================================
+
+  # api-node: MySQL 접속 정보
+  db_env_node = {
+    DB_TYPE     = "mysql"
+    DB_HOST     = module.rds.endpoint
+    DB_PORT     = tostring(module.rds.port)
+    DB_USER     = module.rds.username
+    DB_PASSWORD = var.db_password
+    DB_NAME     = "ecommerce_node"
+  }
+
+  # api-python: MySQL 접속 정보
+  db_env_python = {
+    DB_TYPE     = "mysql"
+    DB_HOST     = module.rds.endpoint
+    DB_PORT     = tostring(module.rds.port)
+    DB_USER     = module.rds.username
+    DB_PASSWORD = var.db_password
+    DB_NAME     = "ecommerce_python"
+  }
+
+  # api-spring: local 프로파일 유지하되 datasource만 MySQL로 override
+  # SPRING_DATASOURCE_* 환경변수가 application-local.yml의 H2 설정을 덮어씀
+  # storage/cache/queue는 local/memory/sync 그대로 유지 (S3, Redis 불필요)
+  db_env_spring = {
+    SPRING_DATASOURCE_URL      = "jdbc:mysql://${module.rds.endpoint}:${module.rds.port}/ecommerce_spring?useSSL=false&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true"
+    SPRING_DATASOURCE_USERNAME = module.rds.username
+    SPRING_DATASOURCE_PASSWORD = var.db_password
+  }
+
+  # 서비스 이름 → DB 환경변수 매핑
+  service_db_envs = {
+    "api-node"   = local.db_env_node
+    "api-python" = local.db_env_python
+    "api-spring" = local.db_env_spring
+    "frontend"   = {}
+  }
+
   ecs_services = {
     for name, svc in var.services : name => {
       cpu            = svc.cpu
@@ -15,8 +57,12 @@ locals {
       container_port = svc.container_port
       desired_count  = svc.desired_count
       image          = svc.image
-      environment    = svc.environment
-      command        = try(svc.command, null)
+      # frontend: ALB DNS 주입 (VITE_API_URL)
+      # 백엔드: tfvars 환경변수 + RDS 접속 정보 merge
+      environment = name == "frontend" ? merge(svc.environment, {
+        VITE_API_URL = "http://${module.alb.alb_dns_name}"
+      }) : merge(svc.environment, local.service_db_envs[name])
+      command = try(svc.command, null)
     }
   }
 }
@@ -72,6 +118,17 @@ module "storage" {
   name_prefix        = var.name_prefix
   private_subnet_ids = module.network.private_subnet_ids
   ecs_sg_id          = module.security.ecs_sg_id
+  tags               = var.tags
+}
+
+module "rds" {
+  source             = "../../modules/rds"
+  name_prefix        = var.name_prefix
+  vpc_id             = module.network.vpc_id
+  private_subnet_ids = module.network.private_subnet_ids
+  ecs_sg_id          = module.security.ecs_sg_id
+  db_username        = var.db_username
+  db_password        = var.db_password
   tags               = var.tags
 }
 

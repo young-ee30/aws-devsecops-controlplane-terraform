@@ -23,3 +23,15 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "db_username" {
+  description = "RDS 마스터 사용자 이름"
+  type        = string
+  default     = "admin"
+}
+
+variable "db_password" {
+  description = "RDS 마스터 비밀번호 (tfvars에 저장 금지 - 환경변수로 주입)"
+  type        = string
+  sensitive   = true
+}
