@@ -150,6 +150,6 @@ module "monitoring" {
   source        = "../../modules/monitoring"
   name_prefix   = var.name_prefix
   cluster_name  = module.ecs.cluster_name
-  service_names = module.ecs.service_names
+  service_names = [for k in keys(var.services) : "${var.name_prefix}-${k}"]
   tags          = var.tags
 }
