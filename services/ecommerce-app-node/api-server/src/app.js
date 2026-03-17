@@ -118,7 +118,7 @@ app.get('/api/config', (req, res) => {
   });
 });
 
-app.get('/metrics', async (req, res) => {
+app.get('/api/metrics', async (req, res) => {
 res.set('Content-Type', promClient.register.contentType);
 res.end(await promClient.register.metrics());
 });
