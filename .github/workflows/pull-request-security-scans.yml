@@ -51,7 +51,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: './services/ecommerce-app-node'
+          scan-ref: './services'
           hide-progress: false
           format: 'table'
           exit-code: '1' # 취약점 발견 시 빌드 실패
