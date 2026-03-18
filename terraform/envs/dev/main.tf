@@ -14,13 +14,8 @@ locals {
   reviews_bucket_arn  = "arn:aws:s3:::${local.reviews_bucket_name}"
   reviews_table_name  = "${var.name_prefix}-reviews"
   reviews_table_arn   = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.reviews_table_name}"
+  enable_bastion      = var.bastion_key_name != null && length(var.bastion_ingress_cidrs) > 0
 
-  # =============================================================
-  # 서비스별 DB 환경변수
-  # RDS 엔드포인트는 apply 후 확정되므로 locals에서 module 참조
-  # =============================================================
-
-  # api-node: MySQL 접속 정보
   db_env_node = {
     DB_TYPE     = "mysql"
     DB_HOST     = module.rds.endpoint
@@ -30,7 +25,6 @@ locals {
     DB_NAME     = "ecommerce_node"
   }
 
-  # api-python: MySQL 접속 정보
   db_env_python = {
     DB_TYPE     = "mysql"
     DB_HOST     = module.rds.endpoint
@@ -40,9 +34,6 @@ locals {
     DB_NAME     = "ecommerce_python"
   }
 
-  # api-spring: local 프로파일 유지하되 datasource만 MySQL로 override
-  # SPRING_DATASOURCE_* 환경변수가 application-local.yml의 H2 설정을 덮어씀
-  # storage/cache/queue는 local/memory/sync 그대로 유지 (S3, Redis 불필요)
   db_env_spring = {
     SPRING_DATASOURCE_URL      = "jdbc:mysql://${module.rds.endpoint}:${module.rds.port}/ecommerce_spring?useSSL=false&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true"
     SPRING_DATASOURCE_USERNAME = module.rds.username
@@ -58,7 +49,6 @@ locals {
     DYNAMODB_REGION = var.aws_region
   }
 
-  # 서비스 이름 → DB 환경변수 매핑
   service_db_envs = {
     "api-node"   = merge(local.db_env_node, local.reviews_env_node)
     "api-python" = local.db_env_python
@@ -73,8 +63,6 @@ locals {
       container_port = svc.container_port
       desired_count  = svc.desired_count
       image          = svc.image
-      # frontend: ALB DNS 주입 (VITE_API_URL)
-      # 백엔드: tfvars 환경변수 + RDS 접속 정보 merge
       environment = name == "frontend" ? merge(svc.environment, {
         VITE_API_URL = "http://${module.alb.alb_dns_name}"
         API_UPSTREAM = module.alb.alb_dns_name
@@ -94,13 +82,24 @@ module "network" {
   tags                 = var.tags
 }
 
+module "bastion" {
+  count = local.enable_bastion ? 1 : 0
+
+  source            = "../../modules/bastion"
+  name_prefix       = var.name_prefix
+  vpc_id            = module.network.vpc_id
+  public_subnet_id  = module.network.public_subnet_ids_by_key["a"]
+  allowed_ssh_cidrs = var.bastion_ingress_cidrs
+  key_name          = var.bastion_key_name
+  instance_type     = var.bastion_instance_type
+  tags              = var.tags
+}
+
 module "security" {
-  source      = "../../modules/security"
-  name_prefix = var.name_prefix
-  vpc_id      = module.network.vpc_id
-  # 전체 서비스 포트 목록 (ALB → ECS 인바운드 허용)
-  # frontend:80, api-node:5000, api-python:8000, api-spring:8080
-  app_ports                  = [80, 5000, 8000, 8080]
+  source                     = "../../modules/security"
+  name_prefix                = var.name_prefix
+  vpc_id                     = module.network.vpc_id
+  app_ports                  = distinct([for _, svc in var.services : svc.container_port])
   reviews_bucket_arn         = local.reviews_bucket_arn
   reviews_dynamodb_table_arn = local.reviews_table_arn
   tags                       = var.tags
@@ -110,7 +109,6 @@ module "ecr" {
   source       = "../../modules/ecr"
   name_prefix  = var.name_prefix
   repositories = var.ecr_repositories
-  # dev: 이미지가 있어도 terraform destroy 가능하게 설정
   force_delete = true
   tags         = var.tags
 }
@@ -133,11 +131,11 @@ module "alb" {
 }
 
 module "storage" {
-  source             = "../../modules/storage"
-  name_prefix        = var.name_prefix
-  private_subnet_ids = module.network.private_subnet_ids
-  ecs_sg_id          = module.security.ecs_sg_id
-  tags               = var.tags
+  source                    = "../../modules/storage"
+  name_prefix               = var.name_prefix
+  private_subnet_ids_by_key = module.network.private_subnet_ids_by_key
+  ecs_sg_id                 = module.security.ecs_sg_id
+  tags                      = var.tags
 }
 
 module "dynamodb" {
@@ -152,6 +150,7 @@ module "rds" {
   vpc_id             = module.network.vpc_id
   private_subnet_ids = module.network.private_subnet_ids
   ecs_sg_id          = module.security.ecs_sg_id
+  bastion_sg_id      = try(module.bastion[0].security_group_id, null)
   db_username        = var.db_username
   db_password        = var.db_password
   tags               = var.tags

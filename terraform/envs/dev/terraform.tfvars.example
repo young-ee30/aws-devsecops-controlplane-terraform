@@ -34,9 +34,9 @@ services = {
       NODE_ENV = "development"
       PORT     = "3000"
     }
-    priority       = 10
-    path_patterns  = ["/node*", "/api/node*"]
-    health_check   = "/health"
+    priority      = 10
+    path_patterns = ["/node*", "/api/node*"]
+    health_check  = "/health"
   }
   api-python = {
     cpu            = 256
@@ -48,9 +48,9 @@ services = {
       APP_ENV = "development"
       PORT    = "8000"
     }
-    priority       = 20
-    path_patterns  = ["/python*", "/api/python*"]
-    health_check   = "/health"
+    priority      = 20
+    path_patterns = ["/python*", "/api/python*"]
+    health_check  = "/health"
   }
   api-spring = {
     cpu            = 512
@@ -62,9 +62,9 @@ services = {
       SPRING_PROFILES_ACTIVE = "dev"
       SERVER_PORT            = "8080"
     }
-    priority       = 30
-    path_patterns  = ["/spring*", "/api/spring*"]
-    health_check   = "/actuator/health"
+    priority      = 30
+    path_patterns = ["/spring*", "/api/spring*"]
+    health_check  = "/actuator/health"
   }
 }
 
@@ -73,3 +73,7 @@ tags = {
   Environment = "dev"
   ManagedBy   = "terraform"
 }
+
+bastion_key_name = "my-bastion-key"
+bastion_ingress_cidrs = ["203.0.113.10/32"]
+bastion_instance_type = "t3.micro"

@@ -63,13 +63,10 @@ resource "aws_efs_file_system" "shared" {
 }
 
 resource "aws_efs_mount_target" "this" {
-  # for_each 대신 count 사용
-  # for_each는 키값이 plan 시점에 확정돼야 하는데
-  # 서브넷 ID는 apply 후에야 생기는 값이라 에러 발생
-  # count는 개수(숫자)만 쓰므로 plan 시점에도 문제없음
-  count = length(var.private_subnet_ids)
+  # Keep static subnet keys and use apply-time subnet IDs only as values.
+  for_each = var.private_subnet_ids_by_key
 
   file_system_id  = aws_efs_file_system.shared.id
-  subnet_id       = var.private_subnet_ids[count.index]
+  subnet_id       = each.value
   security_groups = [var.ecs_sg_id]
 }

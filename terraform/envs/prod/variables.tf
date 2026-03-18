@@ -23,3 +23,21 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "bastion_key_name" {
+  description = "Existing EC2 key pair name for Bastion SSH"
+  type        = string
+  default     = null
+}
+
+variable "bastion_ingress_cidrs" {
+  description = "Trusted CIDRs allowed to SSH into Bastion"
+  type        = list(string)
+  default     = []
+}
+
+variable "bastion_instance_type" {
+  description = "Bastion EC2 instance type"
+  type        = string
+  default     = "t3.micro"
+}

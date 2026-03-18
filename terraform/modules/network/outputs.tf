@@ -3,9 +3,17 @@ output "vpc_id" {
 }
 
 output "public_subnet_ids" {
-  value = [for subnet in aws_subnet.public : subnet.id]
+  value = [for key in sort(keys(aws_subnet.public)) : aws_subnet.public[key].id]
 }
 
 output "private_subnet_ids" {
-  value = [for subnet in aws_subnet.private : subnet.id]
+  value = [for key in sort(keys(aws_subnet.private)) : aws_subnet.private[key].id]
+}
+
+output "public_subnet_ids_by_key" {
+  value = { for key, subnet in aws_subnet.public : key => subnet.id }
+}
+
+output "private_subnet_ids_by_key" {
+  value = { for key, subnet in aws_subnet.private : key => subnet.id }
 }

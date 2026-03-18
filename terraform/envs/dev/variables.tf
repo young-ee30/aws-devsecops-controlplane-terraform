@@ -25,13 +25,31 @@ variable "tags" {
 }
 
 variable "db_username" {
-  description = "RDS 마스터 사용자 이름"
+  description = "RDS master username"
   type        = string
   default     = "admin"
 }
 
 variable "db_password" {
-  description = "RDS 마스터 비밀번호 (tfvars에 저장 금지 - 환경변수로 주입)"
+  description = "RDS master password"
   type        = string
   sensitive   = true
+}
+
+variable "bastion_key_name" {
+  description = "Existing EC2 key pair name for Bastion SSH"
+  type        = string
+  default     = null
+}
+
+variable "bastion_ingress_cidrs" {
+  description = "Trusted CIDRs allowed to SSH into Bastion"
+  type        = list(string)
+  default     = []
+}
+
+variable "bastion_instance_type" {
+  description = "Bastion EC2 instance type"
+  type        = string
+  default     = "t3.micro"
 }

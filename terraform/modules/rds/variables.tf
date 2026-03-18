@@ -1,5 +1,5 @@
 variable "name_prefix" {
-  description = "리소스 이름 prefix"
+  description = "Resource name prefix"
   type        = string
 }
 
@@ -9,29 +9,35 @@ variable "vpc_id" {
 }
 
 variable "private_subnet_ids" {
-  description = "RDS를 배치할 private 서브넷 ID 목록"
+  description = "Private subnet IDs for RDS"
   type        = list(string)
 }
 
 variable "ecs_sg_id" {
-  description = "ECS 보안그룹 ID (RDS 인바운드 허용 대상)"
+  description = "ECS security group ID allowed to reach RDS"
   type        = string
 }
 
+variable "bastion_sg_id" {
+  description = "Optional Bastion security group ID allowed to reach RDS"
+  type        = string
+  default     = null
+}
+
 variable "db_username" {
-  description = "RDS 마스터 사용자 이름"
+  description = "RDS master username"
   type        = string
   default     = "admin"
 }
 
 variable "db_password" {
-  description = "RDS 마스터 비밀번호 (tfvars에 저장하지 말 것)"
+  description = "RDS master password"
   type        = string
   sensitive   = true
 }
 
 variable "instance_class" {
-  description = "RDS 인스턴스 타입"
+  description = "RDS instance class"
   type        = string
   default     = "db.t3.micro"
 }

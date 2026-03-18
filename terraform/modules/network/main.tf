@@ -1,3 +1,19 @@
+locals {
+  public_subnets = {
+    for idx, cidr in var.public_subnet_cidrs : substr(var.azs[idx], length(var.azs[idx]) - 1, 1) => {
+      cidr = cidr
+      az   = var.azs[idx]
+    }
+  }
+
+  private_subnets = {
+    for idx, cidr in var.private_subnet_cidrs : substr(var.azs[idx], length(var.azs[idx]) - 1, 1) => {
+      cidr = cidr
+      az   = var.azs[idx]
+    }
+  }
+}
+
 resource "aws_vpc" "this" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -17,12 +33,7 @@ resource "aws_internet_gateway" "this" {
 }
 
 resource "aws_subnet" "public" {
-  for_each = {
-    for idx, cidr in var.public_subnet_cidrs : idx => {
-      cidr = cidr
-      az   = var.azs[idx]
-    }
-  }
+  for_each = local.public_subnets
 
   vpc_id                  = aws_vpc.this.id
   cidr_block              = each.value.cidr
@@ -30,25 +41,20 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-public-${each.key + 1}"
+    Name = "${var.name_prefix}-public-${upper(each.key)}"
     Tier = "public"
   })
 }
 
 resource "aws_subnet" "private" {
-  for_each = {
-    for idx, cidr in var.private_subnet_cidrs : idx => {
-      cidr = cidr
-      az   = var.azs[idx]
-    }
-  }
+  for_each = local.private_subnets
 
   vpc_id            = aws_vpc.this.id
   cidr_block        = each.value.cidr
   availability_zone = each.value.az
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-private-${each.key + 1}"
+    Name = "${var.name_prefix}-private-${upper(each.key)}"
     Tier = "private"
   })
 }
@@ -63,7 +69,7 @@ resource "aws_eip" "nat" {
 
 resource "aws_nat_gateway" "this" {
   allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
+  subnet_id     = aws_subnet.public["a"].id
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-nat"
@@ -86,9 +92,9 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table_association" "public" {
-  for_each = aws_subnet.public
+  for_each = local.public_subnets
 
-  subnet_id      = each.value.id
+  subnet_id      = aws_subnet.public[each.key].id
   route_table_id = aws_route_table.public.id
 }
 
@@ -106,8 +112,8 @@ resource "aws_route_table" "private" {
 }
 
 resource "aws_route_table_association" "private" {
-  for_each = aws_subnet.private
+  for_each = local.private_subnets
 
-  subnet_id      = each.value.id
+  subnet_id      = aws_subnet.private[each.key].id
   route_table_id = aws_route_table.private.id
 }

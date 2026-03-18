@@ -1,3 +1,5 @@
+data "aws_caller_identity" "current" {}
+
 locals {
   alb_services = {
     for name, svc in var.services : name => {
@@ -7,6 +9,12 @@ locals {
       port          = svc.container_port
     }
   }
+
+  reviews_bucket_name = lower(replace("${var.name_prefix}-reviews", "_", "-"))
+  reviews_bucket_arn  = "arn:aws:s3:::${local.reviews_bucket_name}"
+  reviews_table_name  = "${var.name_prefix}-reviews"
+  reviews_table_arn   = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.reviews_table_name}"
+  enable_bastion      = var.bastion_key_name != null && length(var.bastion_ingress_cidrs) > 0
 
   ecs_services = {
     for name, svc in var.services : name => {
@@ -31,12 +39,27 @@ module "network" {
   tags                 = var.tags
 }
 
+module "bastion" {
+  count = local.enable_bastion ? 1 : 0
+
+  source            = "../../modules/bastion"
+  name_prefix       = var.name_prefix
+  vpc_id            = module.network.vpc_id
+  public_subnet_id  = module.network.public_subnet_ids_by_key["a"]
+  allowed_ssh_cidrs = var.bastion_ingress_cidrs
+  key_name          = var.bastion_key_name
+  instance_type     = var.bastion_instance_type
+  tags              = var.tags
+}
+
 module "security" {
-  source      = "../../modules/security"
-  name_prefix = var.name_prefix
-  vpc_id      = module.network.vpc_id
-  app_port    = 3000
-  tags        = var.tags
+  source                     = "../../modules/security"
+  name_prefix                = var.name_prefix
+  vpc_id                     = module.network.vpc_id
+  app_ports                  = distinct([for _, svc in var.services : svc.container_port])
+  reviews_bucket_arn         = local.reviews_bucket_arn
+  reviews_dynamodb_table_arn = local.reviews_table_arn
+  tags                       = var.tags
 }
 
 module "ecr" {
@@ -64,11 +87,17 @@ module "alb" {
 }
 
 module "storage" {
-  source             = "../../modules/storage"
-  name_prefix        = var.name_prefix
-  private_subnet_ids = module.network.private_subnet_ids
-  ecs_sg_id          = module.security.ecs_sg_id
-  tags               = var.tags
+  source                    = "../../modules/storage"
+  name_prefix               = var.name_prefix
+  private_subnet_ids_by_key = module.network.private_subnet_ids_by_key
+  ecs_sg_id                 = module.security.ecs_sg_id
+  tags                      = var.tags
+}
+
+module "dynamodb" {
+  source      = "../../modules/dynamodb"
+  name_prefix = var.name_prefix
+  tags        = var.tags
 }
 
 module "ecs" {
