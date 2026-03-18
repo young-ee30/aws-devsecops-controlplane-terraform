@@ -48,7 +48,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
           aws-region: ${{ inputs.aws_region || 'ap-northeast-2' }}
 
       - name: Reuse existing or derive deterministic state bucket
@@ -131,6 +131,3 @@ jobs:
             echo "- Downstream Terraform workflow can still discover this bucket automatically."
             echo "- Next step: run \`terraform-dev-plan-apply.yml\`."
           } >> "$GITHUB_STEP_SUMMARY"
-
-
-          
