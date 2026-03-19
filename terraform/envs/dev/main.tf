@@ -201,3 +201,10 @@ module "monitoring" {
   service_names = [for k in keys(var.services) : "${var.name_prefix}-${k}"]
   tags          = var.tags
 }
+
+module "guardduty" {
+  source      = "../../modules/guardduty"
+  name_prefix = var.name_prefix
+  enabled     = true
+  tags        = var.tags
+}

@@ -10,3 +10,4 @@ output "reviews_dynamodb_table_name" { value = module.dynamodb.reviews_table_nam
 output "bastion_public_ip" { value = try(module.bastion[0].public_ip, null) }
 output "bastion_public_dns" { value = try(module.bastion[0].public_dns, null) }
 output "bastion_security_group_id" { value = try(module.bastion[0].security_group_id, null) }
+output "guardduty_detector_id" { value = module.guardduty.detector_id }
