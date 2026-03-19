@@ -5,6 +5,18 @@ variable "azs" { type = list(string) }
 variable "public_subnet_cidrs" { type = list(string) }
 variable "private_subnet_cidrs" { type = list(string) }
 variable "ecr_repositories" { type = list(string) }
+
+variable "active_backend" {
+  description = "Backend service exposed through the shared /api/* and /uploads/* routes"
+  type        = string
+  default     = "api-spring"
+
+  validation {
+    condition     = contains(["api-node", "api-python", "api-spring"], var.active_backend)
+    error_message = "active_backend must be one of api-node, api-python, or api-spring."
+  }
+}
+
 variable "services" {
   type = map(object({
     cpu            = number

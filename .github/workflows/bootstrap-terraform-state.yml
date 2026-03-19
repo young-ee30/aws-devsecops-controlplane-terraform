@@ -2,7 +2,7 @@ name: Bootstrap Terraform State
 
 on:
   push:
-    branches: [main]
+    branches: [main, young]
     paths:
       - "terraform/**"
       - "services/ecommerce-app-node/**"
@@ -132,4 +132,3 @@ jobs:
             echo "- Next step: run \`terraform-dev-plan-apply.yml\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          

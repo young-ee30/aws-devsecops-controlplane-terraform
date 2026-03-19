@@ -1,15 +1,6 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  alb_services = {
-    for name, svc in var.services : name => {
-      priority      = svc.priority
-      path_patterns = svc.path_patterns
-      health_check  = svc.health_check
-      port          = svc.container_port
-    }
-  }
-
   reviews_bucket_name = lower(replace("${var.name_prefix}-reviews", "_", "-"))
   reviews_bucket_arn  = "arn:aws:s3:::${local.reviews_bucket_name}"
   reviews_table_name  = "${var.name_prefix}-reviews"
@@ -19,44 +10,102 @@ locals {
     for idx, _ in var.private_subnet_cidrs : substr(var.azs[idx], length(var.azs[idx]) - 1, 1)
   ])
 
-  db_env_node = {
-    DB_TYPE     = "mysql"
-    DB_HOST     = module.rds.endpoint
-    DB_PORT     = tostring(module.rds.port)
-    DB_USER     = module.rds.username
-    DB_PASSWORD = var.db_password
-    DB_NAME     = "ecommerce_node"
+  active_backend_public_path_patterns = ["/api/*", "/uploads/*"]
+
+  service_specific_path_patterns = {
+    "api-node"   = ["/api/node*", "/node*"]
+    "api-python" = try(var.services["api-python"].path_patterns, ["/api/python*", "/python*"])
+    "api-spring" = try(var.services["api-spring"].path_patterns, ["/api/spring*", "/spring*"])
   }
 
-  db_env_python = {
-    DB_TYPE     = "mysql"
-    DB_HOST     = module.rds.endpoint
-    DB_PORT     = tostring(module.rds.port)
-    DB_USER     = module.rds.username
-    DB_PASSWORD = var.db_password
-    DB_NAME     = "ecommerce_python"
+  effective_service_path_patterns = {
+    for name, svc in var.services : name => (
+      name == "frontend"
+      ? svc.path_patterns
+      : name == var.active_backend
+      ? distinct(concat(local.active_backend_public_path_patterns, local.service_specific_path_patterns[name]))
+      : local.service_specific_path_patterns[name]
+    )
   }
 
-  db_env_spring = {
-    SPRING_DATASOURCE_URL      = "jdbc:mysql://${module.rds.endpoint}:${module.rds.port}/ecommerce_spring?useSSL=false&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true"
-    SPRING_DATASOURCE_USERNAME = module.rds.username
-    SPRING_DATASOURCE_PASSWORD = var.db_password
+  alb_services = {
+    for name, svc in var.services : name => {
+      priority      = svc.priority
+      path_patterns = local.effective_service_path_patterns[name]
+      health_check  = svc.health_check
+      port          = svc.container_port
+    }
   }
 
-  reviews_env_node = {
+  backend_env_node = {
+    DB_TYPE         = "mysql"
+    DB_HOST         = module.rds.endpoint
+    DB_PORT         = tostring(module.rds.port)
+    DB_USER         = module.rds.username
+    DB_PASSWORD     = var.db_password
+    DB_NAME         = "ecommerce_node"
     STORAGE_TYPE    = "s3"
     S3_BUCKET       = local.reviews_bucket_name
     S3_REGION       = var.aws_region
     REVIEW_STORE    = "dynamodb"
     DYNAMODB_TABLE  = local.reviews_table_name
     DYNAMODB_REGION = var.aws_region
+    CACHE_TYPE      = "memory"
+    QUEUE_TYPE      = "sync"
+    JWT_SECRET      = "ecommerce-jwt-secret-key-2024"
   }
 
-  service_db_envs = {
-    "api-node"   = merge(local.db_env_node, local.reviews_env_node)
-    "api-python" = local.db_env_python
-    "api-spring" = local.db_env_spring
+  backend_env_python = {
+    DB_TYPE         = "mysql"
+    DB_HOST         = module.rds.endpoint
+    DB_PORT         = tostring(module.rds.port)
+    DB_USER         = module.rds.username
+    DB_PASSWORD     = var.db_password
+    DB_NAME         = "ecommerce_python"
+    STORAGE_TYPE    = "s3"
+    S3_BUCKET       = local.reviews_bucket_name
+    S3_REGION       = var.aws_region
+    REVIEW_STORE    = "dynamodb"
+    DYNAMODB_TABLE  = local.reviews_table_name
+    DYNAMODB_REGION = var.aws_region
+    CACHE_TYPE      = "memory"
+    QUEUE_TYPE      = "sync"
+    JWT_SECRET      = "ecommerce-jwt-secret-key-2024"
+  }
+
+  backend_env_spring = {
+    SPRING_PROFILES_ACTIVE     = "prod"
+    SPRING_DATASOURCE_URL      = "jdbc:mysql://${module.rds.endpoint}:${module.rds.port}/ecommerce_spring?useSSL=false&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true"
+    SPRING_DATASOURCE_USERNAME = module.rds.username
+    SPRING_DATASOURCE_PASSWORD = var.db_password
+    APP_DB_TYPE                = "mysql"
+    APP_STORAGE_TYPE           = "s3"
+    APP_STORAGE_S3_BUCKET      = local.reviews_bucket_name
+    APP_STORAGE_S3_REGION      = var.aws_region
+    APP_REVIEW_STORE           = "dynamodb"
+    APP_REVIEW_DYNAMODB_TABLE  = local.reviews_table_name
+    APP_REVIEW_DYNAMODB_REGION = var.aws_region
+    APP_CACHE_TYPE             = "memory"
+    APP_QUEUE_TYPE             = "sync"
+    APP_AWS_REGION             = var.aws_region
+    APP_JWT_SECRET             = "ecommerce-jwt-secret-key-2024"
+  }
+
+  service_backend_envs = {
+    "api-node"   = local.backend_env_node
+    "api-python" = local.backend_env_python
+    "api-spring" = local.backend_env_spring
     "frontend"   = {}
+  }
+
+  service_desired_counts = {
+    for name, svc in var.services : name => (
+      name == "frontend"
+      ? max(svc.desired_count, 1)
+      : name == var.active_backend
+      ? max(svc.desired_count, 1)
+      : 0
+    )
   }
 
   ecs_services = {
@@ -64,12 +113,12 @@ locals {
       cpu            = svc.cpu
       memory         = svc.memory
       container_port = svc.container_port
-      desired_count  = svc.desired_count
+      desired_count  = local.service_desired_counts[name]
       image          = svc.image
       environment = name == "frontend" ? merge(svc.environment, {
         VITE_API_URL = "http://${module.alb.alb_dns_name}"
         API_UPSTREAM = module.alb.alb_dns_name
-      }) : merge(svc.environment, local.service_db_envs[name])
+      }) : merge(svc.environment, local.service_backend_envs[name])
       command = try(svc.command, null)
     }
   }

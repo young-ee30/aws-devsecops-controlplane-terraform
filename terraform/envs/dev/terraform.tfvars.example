@@ -12,6 +12,8 @@ ecr_repositories = [
   "frontend"
 ]
 
+active_backend = "api-spring"
+
 services = {
   frontend = {
     cpu            = 256
@@ -28,21 +30,21 @@ services = {
     cpu            = 256
     memory         = 512
     container_port = 3000
-    desired_count  = 1
+    desired_count  = 0
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-node:latest"
     environment    = {
       NODE_ENV = "development"
       PORT     = "3000"
     }
     priority      = 10
-    path_patterns = ["/node*", "/api/node*"]
+    path_patterns = ["/api/node*", "/node*"]
     health_check  = "/health"
   }
   api-python = {
     cpu            = 256
     memory         = 512
     container_port = 8000
-    desired_count  = 1
+    desired_count  = 0
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-python:latest"
     environment    = {
       APP_ENV = "development"
@@ -59,12 +61,12 @@ services = {
     desired_count  = 1
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-spring:latest"
     environment    = {
-      SPRING_PROFILES_ACTIVE = "dev"
+      SPRING_PROFILES_ACTIVE = "prod"
       SERVER_PORT            = "8080"
     }
     priority      = 30
     path_patterns = ["/spring*", "/api/spring*"]
-    health_check  = "/actuator/health"
+    health_check  = "/api/health"
   }
 }
 
