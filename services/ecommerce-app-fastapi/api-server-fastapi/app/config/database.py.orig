@@ -43,8 +43,6 @@ async def init_database():
     elif settings.DB_TYPE == "mysql":
         import aiomysql
 
-        await _ensure_mysql_database_exists()
-
         _mysql_pool = await aiomysql.create_pool(
             host=settings.DB_HOST,
             port=settings.DB_PORT,
@@ -63,30 +61,6 @@ async def init_database():
 
     else:
         raise ValueError(f"지원하지 않는 DB_TYPE: {settings.DB_TYPE}")
-
-
-async def _ensure_mysql_database_exists():
-    """MySQL database가 없으면 먼저 생성한다."""
-    import aiomysql
-
-    conn = await aiomysql.connect(
-        host=settings.DB_HOST,
-        port=settings.DB_PORT,
-        user=settings.DB_USER,
-        password=settings.DB_PASSWORD,
-        charset="utf8mb4",
-        autocommit=True,
-    )
-
-    try:
-        db_name = settings.DB_NAME.replace("`", "``")
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
-                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-            )
-    finally:
-        conn.close()
 
 
 async def close_database():
