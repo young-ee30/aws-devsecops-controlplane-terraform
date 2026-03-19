@@ -214,7 +214,7 @@ RDS 인스턴스 (devsecops-dev-mysql, db.t3.micro)
 |---|---|---|---|---|
 | api-node | 1 | 5000 | `/api/health` | `/api/*`, `/uploads/*` |
 | api-python | 1 | 8000 | `/api/health` | `/python*`, `/api/python*` |
-| api-spring | 1 | 8080 | `/actuator/health` | `/spring*`, `/api/spring*` |
+| api-spring | 1 | 8080 | `/api/health` | `/spring*`, `/api/spring*` |
 | frontend | 1 | 80 | `/` | `/*` (기본) |
 
 ---
