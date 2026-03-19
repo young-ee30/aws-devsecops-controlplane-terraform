@@ -11,7 +11,7 @@ terraform {
 resource "aws_wafv2_web_acl" "this" {
   provider    = aws.us_east_1
   name        = "${var.name_prefix}-waf"
-  description = "WAF for CloudFront: IP 평판, 악성 입력, SQLi/XSS, DDoS 방어"
+  description = "WAF for CloudFront - IP reputation, bad inputs, SQLi/XSS, DDoS protection"
   scope       = "CLOUDFRONT"
 
   default_action {
