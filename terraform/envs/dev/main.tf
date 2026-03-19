@@ -188,6 +188,12 @@ module "cloudfront" {
   }
 }
 
+module "cloudtrail" {
+  source      = "../../modules/cloudtrail"
+  name_prefix = var.name_prefix
+  tags        = var.tags
+}
+
 module "monitoring" {
   source        = "../../modules/monitoring"
   name_prefix   = var.name_prefix
