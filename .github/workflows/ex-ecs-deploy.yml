@@ -6,25 +6,15 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
-      deploy_api_node:
-        description: Deploy api-node
-        required: true
-        default: false
-        type: boolean
-      deploy_api_python:
-        description: Deploy api-python
-        required: true
-        default: false
-        type: boolean
-      deploy_api_spring:
-        description: Deploy api-spring
-        required: true
-        default: false
-        type: boolean
       deploy_frontend:
         description: Deploy frontend
         required: true
-        default: false
+        default: true
+        type: boolean
+      deploy_active_backend:
+        description: Deploy backend selected by terraform/envs/dev/terraform.tfvars active_backend
+        required: true
+        default: true
         type: boolean
 
 permissions:
@@ -43,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       head_sha: ${{ steps.context.outputs.head_sha }}
+      active_backend: ${{ steps.active-backend.outputs.active_backend }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
       matrix: ${{ steps.targets.outputs.matrix }}
 
@@ -63,35 +54,77 @@ jobs:
           fetch-depth: 2
           ref: ${{ steps.context.outputs.head_sha }}
 
+      - name: Resolve active backend from Terraform config
+        id: active-backend
+        shell: bash
+        run: |
+          ACTIVE_BACKEND=$(sed -n 's/^active_backend[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' terraform/envs/dev/terraform.tfvars | head -n 1)
+
+          if [ -z "$ACTIVE_BACKEND" ]; then
+            echo "Could not read active_backend from terraform/envs/dev/terraform.tfvars" >&2
+            exit 1
+          fi
+
+          case "$ACTIVE_BACKEND" in
+            api-node|api-python|api-spring) ;;
+            *)
+              echo "Unsupported active_backend: $ACTIVE_BACKEND" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "active_backend=$ACTIVE_BACKEND" >> "$GITHUB_OUTPUT"
+
       - name: Build service matrix
         id: targets
         shell: bash
+        env:
+          ACTIVE_BACKEND: ${{ steps.active-backend.outputs.active_backend }}
         run: |
           TARGETS=()
 
+          add_target() {
+            local target="$1"
+            for existing in "${TARGETS[@]}"; do
+              if [ "$existing" = "$target" ]; then
+                return 0
+              fi
+            done
+            TARGETS+=("$target")
+          }
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            [ "${{ inputs.deploy_api_node }}" = "true" ] && TARGETS+=('"api-node"')
-            [ "${{ inputs.deploy_api_python }}" = "true" ] && TARGETS+=('"api-python"')
-            [ "${{ inputs.deploy_api_spring }}" = "true" ] && TARGETS+=('"api-spring"')
-            [ "${{ inputs.deploy_frontend }}" = "true" ] && TARGETS+=('"frontend"')
+            [ "${{ inputs.deploy_frontend }}" = "true" ] && add_target "frontend"
+            [ "${{ inputs.deploy_active_backend }}" = "true" ] && add_target "$ACTIVE_BACKEND"
 
             if [ "${#TARGETS[@]}" -eq 0 ]; then
-              echo "Select at least one service to deploy." >&2
+              echo "Select at least one target to deploy." >&2
               exit 1
             fi
           else
             if ! git rev-parse "${{ steps.context.outputs.head_sha }}^" >/dev/null 2>&1; then
-              TARGETS=('"api-node"' '"api-python"' '"api-spring"' '"frontend"')
+              add_target "frontend"
+              add_target "$ACTIVE_BACKEND"
             else
               CHANGED_FILES=$(git diff --name-only "${{ steps.context.outputs.head_sha }}^" "${{ steps.context.outputs.head_sha }}")
 
               if echo "$CHANGED_FILES" | grep -Eq '^(terraform/|\.github/actions/|\.github/workflows/)'; then
-                TARGETS=('"api-node"' '"api-python"' '"api-spring"' '"frontend"')
+                add_target "frontend"
+                add_target "$ACTIVE_BACKEND"
               else
-                echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-node/' && TARGETS+=('"api-node"')
-                echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-fastapi/' && TARGETS+=('"api-python"')
-                echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-spring/' && TARGETS+=('"api-spring"')
-                echo "$CHANGED_FILES" | grep -Eq '^services/frontend/ecommerce-app-frontend/frontend/' && TARGETS+=('"frontend"')
+                echo "$CHANGED_FILES" | grep -Eq '^services/frontend/ecommerce-app-frontend/frontend/' && add_target "frontend"
+
+                case "$ACTIVE_BACKEND" in
+                  api-node)
+                    echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-node/' && add_target "$ACTIVE_BACKEND"
+                    ;;
+                  api-python)
+                    echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-fastapi/' && add_target "$ACTIVE_BACKEND"
+                    ;;
+                  api-spring)
+                    echo "$CHANGED_FILES" | grep -Eq '^services/ecommerce-app-spring/' && add_target "$ACTIVE_BACKEND"
+                    ;;
+                esac
               fi
             fi
 
@@ -102,8 +135,11 @@ jobs:
             fi
           fi
 
+          JSON_TARGETS=$(printf '"%s",' "${TARGETS[@]}")
+          JSON_TARGETS="[${JSON_TARGETS%,}]"
+
           echo "has_targets=true" >> "$GITHUB_OUTPUT"
-          echo "matrix={\"service\":[$(IFS=,; echo "${TARGETS[*]}")]}" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"service\":${JSON_TARGETS}}" >> "$GITHUB_OUTPUT"
 
   deploy-selected:
     name: Deploy ${{ matrix.service }}
@@ -163,103 +199,11 @@ jobs:
               ;;
           esac
 
-      - name: Configure AWS credentials for deployment decision
-        if: github.event_name == 'workflow_dispatch'
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Decide whether deployment is needed
-        id: decision
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Automatic run target" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          SERVICE_PATTERN=""
-          case "${{ matrix.service }}" in
-            api-node)
-              SERVICE_PATTERN='^services/ecommerce-app-node/'
-              ;;
-            api-python)
-              SERVICE_PATTERN='^services/ecommerce-app-fastapi/'
-              ;;
-            api-spring)
-              SERVICE_PATTERN='^services/ecommerce-app-spring/'
-              ;;
-            frontend)
-              SERVICE_PATTERN='^services/frontend/ecommerce-app-frontend/frontend/'
-              ;;
-            *)
-              echo "Unsupported service: ${{ matrix.service }}" >&2
-              exit 1
-              ;;
-          esac
-
-          INFRA_CHANGED=false
-          SERVICE_CHANGED=false
-
-          if git rev-parse "${{ needs.resolve-targets.outputs.head_sha }}^" >/dev/null 2>&1; then
-            CHANGED_FILES=$(git diff --name-only "${{ needs.resolve-targets.outputs.head_sha }}^" "${{ needs.resolve-targets.outputs.head_sha }}")
-
-            if echo "$CHANGED_FILES" | grep -Eq '^(terraform/|\.github/actions/|\.github/workflows/)'; then
-              INFRA_CHANGED=true
-            fi
-
-            if echo "$CHANGED_FILES" | grep -Eq "$SERVICE_PATTERN"; then
-              SERVICE_CHANGED=true
-            fi
-          else
-            INFRA_CHANGED=true
-          fi
-
-          SERVICE_STATUS=$(aws ecs describe-services \
-            --cluster "${{ steps.config.outputs.ecs_cluster }}" \
-            --services "${{ steps.config.outputs.ecs_service }}" \
-            --query 'services[0].status' \
-            --output text 2>/dev/null || true)
-
-          DESIRED_COUNT=$(aws ecs describe-services \
-            --cluster "${{ steps.config.outputs.ecs_cluster }}" \
-            --services "${{ steps.config.outputs.ecs_service }}" \
-            --query 'services[0].desiredCount' \
-            --output text 2>/dev/null || true)
-
-          RUNNING_COUNT=$(aws ecs describe-services \
-            --cluster "${{ steps.config.outputs.ecs_cluster }}" \
-            --services "${{ steps.config.outputs.ecs_service }}" \
-            --query 'services[0].runningCount' \
-            --output text 2>/dev/null || true)
-
-          IS_DEPLOYED=false
-          if [ "$SERVICE_STATUS" = "ACTIVE" ] && [ -n "$DESIRED_COUNT" ] && [ "$DESIRED_COUNT" != "None" ] && [ "$DESIRED_COUNT" != "0" ] && [ -n "$RUNNING_COUNT" ] && [ "$RUNNING_COUNT" != "None" ] && [ "$RUNNING_COUNT" != "0" ]; then
-            IS_DEPLOYED=true
-          fi
-
-          if [ "$INFRA_CHANGED" = "true" ]; then
-            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Terraform or GitHub automation files changed" >> "$GITHUB_OUTPUT"
-          elif [ "$SERVICE_CHANGED" = "true" ]; then
-            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Selected service source changed" >> "$GITHUB_OUTPUT"
-          elif [ "$IS_DEPLOYED" = "false" ]; then
-            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "reason=Service is not currently deployed" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Service is already deployed and no relevant changes were detected" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Deploy selected service
-        if: steps.decision.outputs.should_deploy == 'true'
         uses: ./.github/actions/deploy-ecs-service
         with:
           aws_region: ${{ env.AWS_REGION }}
-          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_role_arn: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           image_tag: ${{ needs.resolve-targets.outputs.head_sha }}
           app_path: ${{ steps.config.outputs.app_path }}
@@ -268,9 +212,3 @@ jobs:
           ecs_cluster: ${{ steps.config.outputs.ecs_cluster }}
           ecs_task_definition: ${{ steps.config.outputs.ecs_task_definition }}
           container_name: ${{ steps.config.outputs.container_name }}
-
-      - name: Skip deployment when not needed
-        if: steps.decision.outputs.should_deploy != 'true'
-        shell: bash
-        run: |
-          echo "Skipping ${{ matrix.service }}: ${{ steps.decision.outputs.reason }}"

@@ -104,8 +104,7 @@ runs:
         service: ${{ inputs.ecs_service }}
         cluster: ${{ inputs.ecs_cluster }}
         wait-for-service-stability: true
-
-    - name: Scale service from zero if needed
+    - name: Preserve zero-scaled services
       shell: bash
       run: |
         CURRENT_DESIRED_COUNT=$(aws ecs describe-services \
@@ -115,11 +114,5 @@ runs:
           --output text)
 
         if [ "$CURRENT_DESIRED_COUNT" = "0" ]; then
-          aws ecs update-service \
-            --cluster "${{ inputs.ecs_cluster }}" \
-            --service "${{ inputs.ecs_service }}" \
-            --desired-count 1 >/dev/null
-          aws ecs wait services-stable \
-            --cluster "${{ inputs.ecs_cluster }}" \
-            --services "${{ inputs.ecs_service }}"
+          echo "Service is intentionally scaled to 0. Skipping automatic scale-up."
         fi

@@ -12,6 +12,8 @@ ecr_repositories = [
   "frontend"
 ]
 
+active_backend = "api-spring"
+
 services = {
   frontend = {
     cpu            = 256
@@ -28,29 +30,29 @@ services = {
     cpu            = 256
     memory         = 512
     container_port = 3000
-    desired_count  = 1
+    desired_count  = 0
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-node:latest"
     environment    = {
       NODE_ENV = "development"
       PORT     = "3000"
     }
-    priority       = 10
-    path_patterns  = ["/node*", "/api/node*"]
-    health_check   = "/health"
+    priority      = 10
+    path_patterns = ["/api/node*", "/node*"]
+    health_check  = "/health"
   }
   api-python = {
     cpu            = 256
     memory         = 512
     container_port = 8000
-    desired_count  = 1
+    desired_count  = 0
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-python:latest"
     environment    = {
       APP_ENV = "development"
       PORT    = "8000"
     }
-    priority       = 20
-    path_patterns  = ["/python*", "/api/python*"]
-    health_check   = "/health"
+    priority      = 20
+    path_patterns = ["/python*", "/api/python*"]
+    health_check  = "/health"
   }
   api-spring = {
     cpu            = 512
@@ -59,12 +61,12 @@ services = {
     desired_count  = 1
     image          = "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-spring:latest"
     environment    = {
-      SPRING_PROFILES_ACTIVE = "dev"
+      SPRING_PROFILES_ACTIVE = "prod"
       SERVER_PORT            = "8080"
     }
-    priority       = 30
-    path_patterns  = ["/spring*", "/api/spring*"]
-    health_check   = "/actuator/health"
+    priority      = 30
+    path_patterns = ["/spring*", "/api/spring*"]
+    health_check  = "/actuator/health"
   }
 }
 
@@ -73,3 +75,7 @@ tags = {
   Environment = "dev"
   ManagedBy   = "terraform"
 }
+
+bastion_key_name = "my-bastion-key"
+bastion_ingress_cidrs = ["203.0.113.10/32"]
+bastion_instance_type = "t3.micro"
