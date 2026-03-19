@@ -14,7 +14,7 @@ locals {
   reviews_bucket_arn  = "arn:aws:s3:::${local.reviews_bucket_name}"
   reviews_table_name  = "${var.name_prefix}-reviews"
   reviews_table_arn   = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${local.reviews_table_name}"
-  enable_bastion      = var.bastion_key_name != null && length(var.bastion_ingress_cidrs) > 0
+  enable_bastion = var.bastion_key_name != null && length(var.bastion_ingress_cidrs) > 0
   private_subnet_keys = toset([
     for idx, _ in var.private_subnet_cidrs : substr(var.azs[idx], length(var.azs[idx]) - 1, 1)
   ])
@@ -154,7 +154,7 @@ module "rds" {
   vpc_id             = module.network.vpc_id
   private_subnet_ids = module.network.private_subnet_ids
   ecs_sg_id          = module.security.ecs_sg_id
-  bastion_sg_id      = try(module.bastion[0].security_group_id, null)
+  bastion_sg_id      = module.bastion[0].security_group_id
   db_username        = var.db_username
   db_password        = var.db_password
   tags               = var.tags
