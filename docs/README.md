@@ -2,6 +2,12 @@
 
 이 문서는 이 저장소의 대시보드에서 GitHub Actions 실행, 실패 로그 조회, LLM 수정 제안, 사용자 승인 후 코드 수정, PR 생성, 재실행까지 연결하는 기준 가이드입니다.
 
+참고:
+
+- 로컬 백엔드 + polling + GitHub App 기준으로 시작할 때는 `docs/dashboard-local-to-aws-guide.md`
+- `controlplane/api`를 AWS로 옮길 때 바뀌는 항목은 `docs/controlplane-api-aws-deploy-checklist.md`
+- 이 문서는 공개 도메인과 webhook 활성화를 포함한 최종형 기준입니다.
+
 기준 원칙은 다음과 같습니다.
 
 - Git 연결은 `Personal Access Token` 대신 `GitHub App`으로 한다.
@@ -9,6 +15,7 @@
 - 모든 GitHub 제어는 서버 측 `controlplane/api`가 `GitHub App installation token`으로 수행한다.
 - AI가 만든 수정은 `main`에 바로 push하지 않고 `branch -> PR -> 승인 -> merge` 흐름으로 간다.
 - Terraform과 workflow 파일은 특히 보호한다.
+- 배포 버튼은 로컬이든 AWS든 `controlplane/api -> GitHub Actions` 순서로 동작한다.
 
 ## 1. 왜 GitHub App인가
 
@@ -55,6 +62,7 @@ GitHub 조직 기준으로 아래 경로로 이동합니다.
 - `GitHub App name`: `devsecops-dashboard-bot`
 - `Homepage URL`: `https://dashboard.your-domain.com`
 - `Setup URL`: `https://dashboard.your-domain.com/settings/github/installed`
+- `Callback URL`: 비워두거나, user-to-server authorization 사용 시 `https://dashboard.your-domain.com/settings/github/callback`
 - `Webhook`: `Active`
 - `Webhook URL`: `https://api.your-domain.com/api/github/webhook`
 - `Webhook secret`: 랜덤 32자 이상
@@ -226,6 +234,8 @@ export async function getRepoOctokit(owner: string, repo: string) {
 
 ## 11. Actions 실행 및 재실행 예시
 
+이 호출은 로컬 백엔드에서도 동일하게 사용할 수 있습니다. 차이는 로컬 서버가 GitHub API를 호출하느냐, AWS에 올라간 서버가 호출하느냐뿐입니다.
+
 실패한 workflow 재실행:
 
 ```ts
@@ -257,6 +267,8 @@ await gh.request(
 
 - `.github/workflows/terraform-dev-plan-apply.yml`
 - `.github/workflows/ex-ecs-deploy.yml`
+
+즉, 대시보드에서 `Deploy` 버튼을 누르면 `controlplane/api`가 `workflow_dispatch`를 호출하고, 실제 배포는 GitHub Actions가 AWS에 수행합니다.
 
 ## 12. AI 수정 확정 후 실제 코드 반영 플로우
 
