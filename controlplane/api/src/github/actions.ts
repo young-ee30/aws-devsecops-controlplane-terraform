@@ -2,6 +2,23 @@ import { env } from '../config/env.js'
 import { getInstallationToken, getRepoOctokit, getRepositoryMetadata } from './app.js'
 
 type WorkflowDispatchInput = Record<string, string | number | boolean>
+type WorkflowAnnotation = {
+  path: string | null
+  startLine: number | null
+  endLine: number | null
+  startColumn: number | null
+  endColumn: number | null
+  annotationLevel: string
+  message: string
+  title: string | null
+  rawDetails: string | null
+  blobHref: string | null
+}
+
+type WorkflowRunAnnotation = WorkflowAnnotation & {
+  jobId: number
+  jobName: string
+}
 
 const FULL_PIPELINE_ENTRY_WORKFLOW = 'bootstrap-terraform-state.yml'
 const FULL_PIPELINE_DEFAULT_INPUTS: WorkflowDispatchInput = {
@@ -11,6 +28,127 @@ const FULL_PIPELINE_DEFAULT_INPUTS: WorkflowDispatchInput = {
 
 function formatConclusion(value: string | null | undefined): string {
   return value || 'unknown'
+}
+
+function parseCheckRunId(checkRunUrl: string | null | undefined): number | null {
+  if (!checkRunUrl) return null
+
+  const matched = checkRunUrl.match(/\/check-runs\/(\d+)/)
+  if (!matched) return null
+
+  const parsed = Number(matched[1])
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+function normalizeJobLogLine(rawLine: string): string {
+  return rawLine.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/, '')
+}
+
+function normalizeRepositoryPath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/^\/+/, '')
+}
+
+function parseCheckovFileLocation(rawValue: string): {
+  path: string
+  startLine: number | null
+  endLine: number | null
+} | null {
+  const matched = rawValue.match(/^(.*?):(\d+)(?:-(\d+))?$/)
+  if (!matched) {
+    const normalizedPath = normalizeRepositoryPath(rawValue.trim())
+    return normalizedPath ? { path: normalizedPath, startLine: null, endLine: null } : null
+  }
+
+  const startLine = Number(matched[2])
+  const endLine = matched[3] ? Number(matched[3]) : startLine
+  const normalizedPath = normalizeRepositoryPath(matched[1].trim())
+
+  if (!normalizedPath) {
+    return null
+  }
+
+  return {
+    path: normalizedPath,
+    startLine: Number.isNaN(startLine) ? null : startLine,
+    endLine: Number.isNaN(endLine) ? null : endLine,
+  }
+}
+
+function parseCheckovAnnotationsFromLog(jobId: number, jobName: string, content: string): WorkflowRunAnnotation[] {
+  const lines = content.split(/\r?\n/).map(normalizeJobLogLine)
+  const annotations: WorkflowRunAnnotation[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const checkMatch = lines[index].match(/^Check:\s+(CKV[0-9A-Z_]+):\s+"(.+)"$/)
+    if (!checkMatch) {
+      continue
+    }
+
+    const checkId = checkMatch[1]
+    const checkTitle = checkMatch[2]
+    let resource: string | null = null
+    let primaryFile: ReturnType<typeof parseCheckovFileLocation> = null
+    let callingFile: ReturnType<typeof parseCheckovFileLocation> = null
+    let guide: string | null = null
+
+    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+      const nextLine = lines[nextIndex].trim()
+      if (nextLine.startsWith('Check: ')) {
+        break
+      }
+
+      const resourceMatch = nextLine.match(/^FAILED for resource:\s+(.+)$/)
+      if (resourceMatch) {
+        resource = resourceMatch[1].trim()
+        continue
+      }
+
+      const fileMatch = nextLine.match(/^(?:##\[error\]\s*)?File:\s+(.+)$/)
+      if (fileMatch) {
+        primaryFile = parseCheckovFileLocation(fileMatch[1])
+        continue
+      }
+
+      const callingFileMatch = nextLine.match(/^Calling File:\s+(.+)$/)
+      if (callingFileMatch) {
+        callingFile = parseCheckovFileLocation(callingFileMatch[1])
+        continue
+      }
+
+      const guideMatch = nextLine.match(/^Guide:\s+(.+)$/)
+      if (guideMatch) {
+        guide = guideMatch[1].trim()
+      }
+    }
+
+    if (!resource && !primaryFile && !callingFile) {
+      continue
+    }
+
+    const location = primaryFile || callingFile
+    const rawDetails = [
+      resource ? `Resource: ${resource}` : null,
+      callingFile ? `Calling file: ${callingFile.path}${callingFile.startLine ? `:${callingFile.startLine}${callingFile.endLine && callingFile.endLine !== callingFile.startLine ? `-${callingFile.endLine}` : ''}` : ''}` : null,
+      guide ? `Guide: ${guide}` : null,
+    ].filter((value): value is string => !!value)
+
+    annotations.push({
+      jobId,
+      jobName,
+      path: location?.path || null,
+      startLine: location?.startLine ?? null,
+      endLine: location?.endLine ?? null,
+      startColumn: null,
+      endColumn: null,
+      annotationLevel: 'failure',
+      message: checkTitle,
+      title: checkId,
+      rawDetails: rawDetails.length > 0 ? rawDetails.join(' | ') : null,
+      blobHref: null,
+    })
+  }
+
+  return annotations
 }
 
 export async function listWorkflowRuns(limit = 20) {
@@ -51,6 +189,7 @@ export async function getWorkflowRunJobs(runId: number) {
 
   return response.data.jobs.map((job) => ({
     id: job.id,
+    checkRunId: parseCheckRunId('check_run_url' in job ? job.check_run_url : null),
     name: job.name,
     status: job.status,
     conclusion: job.conclusion,
@@ -68,6 +207,100 @@ export async function getWorkflowRunJobs(runId: number) {
       completedAt: step.completed_at,
     })),
   }))
+}
+
+async function fetchCheckRunAnnotations(checkRunId: number) {
+  const octokit = await getRepoOctokit()
+  const annotations: WorkflowAnnotation[] = []
+
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await octokit.request('GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations', {
+      owner: env.githubOwner,
+      repo: env.githubRepo,
+      check_run_id: checkRunId,
+      per_page: 100,
+      page,
+    })
+
+    const batch = response.data.map((annotation) => ({
+      path: annotation.path || null,
+      startLine: annotation.start_line ?? null,
+      endLine: annotation.end_line ?? null,
+      startColumn: annotation.start_column ?? null,
+      endColumn: annotation.end_column ?? null,
+      annotationLevel: annotation.annotation_level || 'notice',
+      message: annotation.message || 'No annotation message was provided.',
+      title: annotation.title || null,
+      rawDetails: annotation.raw_details || null,
+      blobHref: annotation.blob_href || null,
+    }))
+
+    annotations.push(...batch)
+
+    if (batch.length < 100) {
+      break
+    }
+  }
+
+  return annotations
+}
+
+function dedupeWorkflowAnnotations(annotations: WorkflowRunAnnotation[]): WorkflowRunAnnotation[] {
+  const unique = new Map<string, WorkflowRunAnnotation>()
+
+  for (const annotation of annotations) {
+    const key = [
+      annotation.jobId,
+      annotation.path || '',
+      annotation.startLine ?? '',
+      annotation.endLine ?? '',
+      annotation.startColumn ?? '',
+      annotation.endColumn ?? '',
+      annotation.annotationLevel,
+      annotation.title || '',
+      annotation.message,
+      annotation.rawDetails || '',
+      annotation.blobHref || '',
+    ].join('::')
+
+    if (!unique.has(key)) {
+      unique.set(key, annotation)
+    }
+  }
+
+  return [...unique.values()]
+}
+
+export async function getWorkflowRunAnnotations(runId: number) {
+  const jobs = await getWorkflowRunJobs(runId)
+  const annotationsByJob = await Promise.all(
+    jobs.map(async (job) => {
+      if (!job.checkRunId) {
+        return []
+      }
+
+      try {
+        const githubAnnotations = await fetchCheckRunAnnotations(job.checkRunId)
+        return githubAnnotations.map((annotation) => ({
+          jobId: job.id,
+          jobName: job.name,
+          ...annotation,
+        }))
+      } catch {
+        return []
+      }
+    }),
+  )
+
+  const annotations = annotationsByJob.flat()
+  const dedupedAnnotations = dedupeWorkflowAnnotations(annotations)
+
+  return {
+    runId,
+    source: 'github-api' as const,
+    rawCount: annotations.length,
+    annotations: dedupedAnnotations,
+  }
 }
 
 async function fetchJobLogText(jobId: number) {

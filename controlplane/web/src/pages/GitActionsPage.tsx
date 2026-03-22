@@ -20,12 +20,12 @@ import {
 import { PageHeader } from '@/components/layout/Header'
 import PipelineGraph from '@/components/pipeline/PipelineGraph'
 import StepTimeline from '@/components/pipeline/StepTimeline'
+import { API_BASE_URL } from '@/lib/env'
 import { cn } from '@/lib/utils'
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || 'http://localhost:4000'
 const POLLING_INTERVAL_MS = 15000
 const NEW_RUN_POLL_ATTEMPTS = 10
 const NEW_RUN_POLL_INTERVAL_MS = 1500
+const PIPELINE_SESSION_WINDOW_MS = 20 * 60 * 1000
 const FULL_PIPELINE_WORKFLOW_NAME = 'Bootstrap Terraform State'
 const PIPELINE_WORKFLOW_NAMES = [
   'Bootstrap Terraform State',
@@ -82,6 +82,7 @@ interface WorkflowStep {
 
 interface WorkflowJob {
   id: number
+  checkRunId?: number | null
   name: string
   status: string
   conclusion: string | null
@@ -112,6 +113,52 @@ interface WorkflowLogsResponse {
   logs: WorkflowJobLog[]
 }
 
+interface WorkflowAnnotation {
+  jobId: number
+  jobName: string
+  path: string | null
+  startLine: number | null
+  endLine: number | null
+  startColumn: number | null
+  endColumn: number | null
+  annotationLevel: string
+  message: string
+  title: string | null
+  rawDetails: string | null
+  blobHref: string | null
+}
+
+interface WorkflowAnnotationsResponse {
+  runId: number
+  source?: 'github-api'
+  rawCount?: number
+  annotations: WorkflowAnnotation[]
+}
+
+interface WorkflowAnnotationsMeta {
+  source: 'github-api' | 'unknown'
+  rawCount: number
+}
+
+interface AnnotationListItem {
+  key: string
+  title: string | null
+  message: string
+  annotationLevel: string
+  path: string | null
+  startLine: number | null
+  source: 'github-annotation' | 'job-error'
+}
+
+interface AnnotationSummary {
+  key: string
+  title: string | null
+  message: string
+  annotationLevel: string
+  count: number
+  samplePath: string | null
+}
+
 interface ApiErrorPayload {
   error?: string
   message?: string
@@ -123,6 +170,8 @@ interface SuggestResponse {
   message: string
   mode?: 'rule-based' | 'llm' | 'hybrid'
   configuredModel?: string
+  llmStatus?: 'not_attempted' | 'success' | 'failed'
+  llmError?: string
   summary?: string
   rootCause?: string
   riskLevel?: 'low' | 'medium' | 'high'
@@ -186,6 +235,11 @@ interface RunSummaryResponse {
   jobs: JobSummary[]
   overallSummary: string
   currentPhase: string | null
+}
+
+interface StepSelection {
+  jobId: number
+  stepNumber: number
 }
 
 interface GithubStatusResponse {
@@ -302,10 +356,34 @@ function getSelectableRuns(runs: WorkflowRun[]): WorkflowRun[] {
   return pipelineRuns.length > 0 ? pipelineRuns : runs
 }
 
+function getRunCreatedAtMs(run: WorkflowRun): number {
+  const createdAtMs = new Date(run.createdAt).getTime()
+  return Number.isNaN(createdAtMs) ? 0 : createdAtMs
+}
+
 function getVisibleWorkflowRuns(runs: WorkflowRun[]): WorkflowRun[] {
   const selectableRuns = getSelectableRuns(runs)
+  const anchorRun =
+    selectableRuns.find((run) => run.status !== 'completed') ||
+    selectableRuns[0] ||
+    null
 
-  return PIPELINE_WORKFLOW_NAMES.map((workflowName) => selectableRuns.find((run) => run.name === workflowName)).filter(
+  if (!anchorRun) {
+    return []
+  }
+
+  const anchorCreatedAtMs = getRunCreatedAtMs(anchorRun)
+  const anchorBranch = anchorRun.branch
+  const sessionRuns = selectableRuns.filter((run) => {
+    if (anchorBranch && run.branch && run.branch !== anchorBranch) {
+      return false
+    }
+
+    const createdAtMs = getRunCreatedAtMs(run)
+    return Math.abs(anchorCreatedAtMs - createdAtMs) <= PIPELINE_SESSION_WINDOW_MS
+  })
+
+  return PIPELINE_WORKFLOW_NAMES.map((workflowName) => sessionRuns.find((run) => run.name === workflowName)).filter(
     (run): run is WorkflowRun => !!run,
   )
 }
@@ -464,8 +542,136 @@ function getStepTone(conclusion: string | null, status: string) {
   }
 }
 
+function getAnnotationPresentation(level: string) {
+  if (level === 'failure') {
+    return {
+      badge: 'bg-red-100 text-red-700',
+      label: 'failure',
+    }
+  }
+
+  if (level === 'warning') {
+    return {
+      badge: 'bg-amber-100 text-amber-700',
+      label: 'warning',
+    }
+  }
+
+  return {
+    badge: 'bg-sky-100 text-sky-700',
+    label: level || 'notice',
+  }
+}
+
+function summarizeAnnotations(
+  annotations: Array<Pick<WorkflowAnnotation, 'annotationLevel' | 'title' | 'message' | 'path'>>,
+): AnnotationSummary[] {
+  const grouped = new Map<string, AnnotationSummary>()
+
+  for (const annotation of annotations) {
+    const key = `${annotation.annotationLevel}::${annotation.title || ''}::${annotation.message}`
+    const existing = grouped.get(key)
+
+    if (existing) {
+      existing.count += 1
+      continue
+    }
+
+    grouped.set(key, {
+      key,
+      title: annotation.title,
+      message: annotation.message,
+      annotationLevel: annotation.annotationLevel,
+      count: 1,
+      samplePath: annotation.path,
+    })
+  }
+
+  return [...grouped.values()]
+}
+
 function splitLogLines(content: string): string[] {
   return content.split(/\r?\n/)
+}
+
+function normalizeLogErrorLine(line: string): string {
+  return line
+    .replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s?/, '')
+    .replace(/^##\[(?:error|warning|notice)\]\s*/, '')
+    .trim()
+}
+
+function extractTerminalErrors(content: string | undefined): string[] {
+  if (!content) {
+    return []
+  }
+
+  const unique = new Set<string>()
+  const errors: string[] = []
+
+  for (const rawLine of splitLogLines(content)) {
+    const line = normalizeLogErrorLine(rawLine)
+    if (!line) {
+      continue
+    }
+
+    if (!/process completed with exit code \d+\.?/i.test(line) && !/terraform exited with code \d+\.?/i.test(line)) {
+      continue
+    }
+
+    const normalized = line.replace(/\s+/g, ' ').toLowerCase()
+    if (unique.has(normalized)) {
+      continue
+    }
+
+    unique.add(normalized)
+    errors.push(line)
+  }
+
+  return errors
+}
+
+function buildAnnotationListItems(annotations: WorkflowAnnotation[], logContent?: string): AnnotationListItem[] {
+  const items: AnnotationListItem[] = annotations.map((annotation) => ({
+    key: [
+      annotation.jobId,
+      annotation.path || '',
+      annotation.startLine ?? '',
+      annotation.endLine ?? '',
+      annotation.title || '',
+      annotation.message,
+    ].join('::'),
+    title: annotation.title,
+    message: annotation.message,
+    annotationLevel: annotation.annotationLevel,
+    path: annotation.path,
+    startLine: annotation.startLine,
+    source: 'github-annotation',
+  }))
+
+  const existingTerminalMessages = new Set(
+    items.map((item) => item.message.replace(/\s+/g, ' ').toLowerCase()),
+  )
+
+  for (const message of extractTerminalErrors(logContent)) {
+    const normalized = message.replace(/\s+/g, ' ').toLowerCase()
+    if (existingTerminalMessages.has(normalized)) {
+      continue
+    }
+
+    existingTerminalMessages.add(normalized)
+    items.push({
+      key: `job-error::${normalized}`,
+      title: null,
+      message,
+      annotationLevel: 'failure',
+      path: null,
+      startLine: null,
+      source: 'job-error',
+    })
+  }
+
+  return items
 }
 
 type ParsedLogTone =
@@ -563,6 +769,68 @@ function parseLogLines(content: string): ParsedLogLine[] {
   })
 }
 
+function getIsoTimestampMs(value?: string | null): number | null {
+  if (!value) {
+    return null
+  }
+
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? null : timestamp
+}
+
+function getRawLogTimestampMs(rawLine: string): number | null {
+  const matched = rawLine.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/)
+  return matched ? getIsoTimestampMs(matched[1]) : null
+}
+
+function buildStepLogContent(step: WorkflowStep, steps: WorkflowStep[], content?: string): string {
+  if (!content) {
+    return ''
+  }
+
+  const sortedSteps = [...steps].sort((left, right) => left.number - right.number)
+  const stepIndex = sortedSteps.findIndex((candidate) => candidate.number === step.number)
+  const nextStep = stepIndex >= 0 ? sortedSteps[stepIndex + 1] : undefined
+  const stepStartMs = getIsoTimestampMs(step.startedAt)
+  const stepEndMs = getIsoTimestampMs(step.completedAt)
+  const nextStepStartMs = getIsoTimestampMs(nextStep?.startedAt)
+
+  let lastIncluded = false
+  const selectedLines = splitLogLines(content).filter((rawLine) => {
+    const lineTimestampMs = getRawLogTimestampMs(rawLine)
+    if (lineTimestampMs == null) {
+      return lastIncluded
+    }
+
+    const afterStart = stepStartMs == null ? true : lineTimestampMs >= stepStartMs
+    const beforeEnd = nextStepStartMs != null
+      ? lineTimestampMs < nextStepStartMs
+      : stepEndMs != null
+        ? lineTimestampMs <= stepEndMs + 1000
+        : true
+
+    lastIncluded = afterStart && beforeEnd
+    return lastIncluded
+  })
+
+  return selectedLines.join('\n').trim()
+}
+
+function getCurrentStepTarget(jobs: WorkflowJob[]): StepSelection | null {
+  for (const job of jobs) {
+    const activeStep = job.steps.find((step) => step.status === 'in_progress')
+    if (activeStep) {
+      return { jobId: job.id, stepNumber: activeStep.number }
+    }
+  }
+
+  return null
+}
+
+function getWorkflowStepDomId(jobId: number, stepNumber: number): string {
+  return `workflow-step-${jobId}-${stepNumber}`
+}
+
 function getLogToneClass(tone: ParsedLogTone): string {
   if (tone === 'error') {
     return 'text-red-700'
@@ -605,7 +873,10 @@ export default function GitActionsPage() {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
   const [jobs, setJobs] = useState<WorkflowJob[]>([])
   const [logs, setLogs] = useState<WorkflowJobLog[]>([])
+  const [annotations, setAnnotations] = useState<WorkflowAnnotation[]>([])
+  const [annotationsMeta, setAnnotationsMeta] = useState<WorkflowAnnotationsMeta | null>(null)
   const [expandedJobIds, setExpandedJobIds] = useState<number[]>([])
+  const [selectedStepTarget, setSelectedStepTarget] = useState<StepSelection | null>(null)
   const [loadingStatus, setLoadingStatus] = useState(true)
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
@@ -617,6 +888,7 @@ export default function GitActionsPage() {
   const [rerunAction, setRerunAction] = useState<'all' | 'failed' | null>(null)
   const [suggestLoading, setSuggestLoading] = useState(false)
   const [suggestion, setSuggestion] = useState<SuggestResponse | null>(null)
+  const [suggestionContextLabel, setSuggestionContextLabel] = useState<string | null>(null)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [runSummary, setRunSummary] = useState<RunSummaryResponse | null>(null)
   const [prReview, setPrReview] = useState<PrReview | null>(null)
@@ -628,9 +900,11 @@ export default function GitActionsPage() {
   const latestDetailRequestIdRef = useRef(0)
   const latestLogsRequestIdRef = useRef(0)
   const latestSummaryRequestIdRef = useRef(0)
+  const latestAnnotationsRequestIdRef = useRef(0)
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) || null
   const isGithubDisconnected = !loadingStatus && (!status || !!statusError)
+  const currentStepTarget = getCurrentStepTarget(jobs)
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId
@@ -640,6 +914,21 @@ export default function GitActionsPage() {
     selectedWorkflowIdRef.current = selectedRun?.workflowId ?? null
   }, [selectedRun])
 
+  useEffect(() => {
+    if (!selectedStepTarget) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      const element = document.getElementById(
+        getWorkflowStepDomId(selectedStepTarget.jobId, selectedStepTarget.stepNumber),
+      )
+      element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [expandedJobIds, selectedStepTarget])
+
   async function fetchRuns(limit = 20) {
     const response = await apiFetch<WorkflowRunsResponse>(`/api/github/runs?limit=${limit}`)
     return response.runs
@@ -648,6 +937,34 @@ export default function GitActionsPage() {
   function handleSelectRun(runId: number) {
     manualSelectionVersionRef.current += 1
     setSelectedRunId(runId)
+  }
+
+  async function handleSelectStep(job: WorkflowJob, step: WorkflowStep) {
+    setExpandedJobIds((current) => (current.includes(job.id) ? current : [...current, job.id]))
+    setSelectedStepTarget({ jobId: job.id, stepNumber: step.number })
+
+    if (!selectedRunId) {
+      return
+    }
+
+    const existingLog = logs.find((log) => log.jobId === job.id)
+    if (!existingLog) {
+      await loadRunLogs(selectedRunId, job.id)
+    }
+  }
+
+  async function handleFocusCurrentStep() {
+    if (!currentStepTarget) {
+      return
+    }
+
+    const targetJob = jobs.find((job) => job.id === currentStepTarget.jobId)
+    const targetStep = targetJob?.steps.find((step) => step.number === currentStepTarget.stepNumber)
+    if (!targetJob || !targetStep) {
+      return
+    }
+
+    await handleSelectStep(targetJob, targetStep)
   }
 
   async function loadRunSummary(runId: number) {
@@ -668,25 +985,67 @@ export default function GitActionsPage() {
     }
   }
 
-  async function loadRunLogs(runId: number) {
+  async function loadRunLogs(runId: number, requestedJobId?: number) {
     const requestId = latestLogsRequestIdRef.current + 1
     latestLogsRequestIdRef.current = requestId
 
     try {
-      const response = await apiFetch<WorkflowLogsResponse>(`/api/github/runs/${runId}/logs`)
+      const response = await apiFetch<WorkflowLogsResponse>(
+        `/api/github/runs/${runId}/logs${requestedJobId ? `?jobId=${requestedJobId}` : ''}`,
+      )
       if (latestLogsRequestIdRef.current !== requestId || selectedRunIdRef.current !== runId) {
         return []
       }
 
-      setLogs(response.logs)
-      setExpandedJobIds((current) => (current.length > 0 ? current : response.selectedJobIds))
+      if (requestedJobId) {
+        setLogs((current) => {
+          const next = new Map(current.map((log) => [log.jobId, log]))
+          for (const log of response.logs) {
+            next.set(log.jobId, log)
+          }
+          return [...next.values()]
+        })
+      } else {
+        setLogs(response.logs)
+        setExpandedJobIds((current) => (current.length > 0 ? current : response.selectedJobIds))
+      }
+
       return response.logs
     } catch {
       if (latestLogsRequestIdRef.current !== requestId || selectedRunIdRef.current !== runId) {
         return []
       }
 
-      setLogs([])
+      if (!requestedJobId) {
+        setLogs([])
+      }
+      return []
+    }
+  }
+
+  async function loadRunAnnotations(runId: number) {
+    const requestId = latestAnnotationsRequestIdRef.current + 1
+    latestAnnotationsRequestIdRef.current = requestId
+
+    try {
+      const response = await apiFetch<WorkflowAnnotationsResponse>(`/api/github/runs/${runId}/annotations`)
+      if (latestAnnotationsRequestIdRef.current !== requestId || selectedRunIdRef.current !== runId) {
+        return []
+      }
+
+      setAnnotations(response.annotations)
+      setAnnotationsMeta({
+        source: response.source || 'unknown',
+        rawCount: response.rawCount ?? response.annotations.length,
+      })
+      return response.annotations
+    } catch {
+      if (latestAnnotationsRequestIdRef.current !== requestId || selectedRunIdRef.current !== runId) {
+        return []
+      }
+
+      setAnnotations([])
+      setAnnotationsMeta(null)
       return []
     }
   }
@@ -818,6 +1177,7 @@ export default function GitActionsPage() {
         loadRunDetail(nextSelectedRun.id),
         loadRunSummary(nextSelectedRun.id),
         loadRunLogs(nextSelectedRun.id),
+        loadRunAnnotations(nextSelectedRun.id),
       ])
     }
   }
@@ -946,6 +1306,7 @@ export default function GitActionsPage() {
     setSuggestLoading(true)
     setActionMessage(null)
     setPrReview(null)
+    setSuggestionContextLabel(null)
 
     try {
       const payload = await apiFetch<SuggestResponse>(`/api/github/fix-sessions/${selectedRunId}/suggest`, {
@@ -953,9 +1314,92 @@ export default function GitActionsPage() {
         body: JSON.stringify({}),
       })
       setSuggestion(payload)
-      setActionMessage(payload.message)
+      setActionMessage(
+        payload.llmStatus === 'failed' && payload.llmError
+          ? `Gemini 호출 실패로 rule-based 결과만 표시 중입니다. ${payload.llmError}`
+          : payload.message,
+      )
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : 'AI 제안 요청에 실패했습니다.')
+    } finally {
+      setSuggestLoading(false)
+    }
+  }
+
+  async function handleSuggestAnnotations(job: WorkflowJob, annotationSummaries: AnnotationSummary[]) {
+    if (!selectedRunId || annotationSummaries.length === 0) {
+      return
+    }
+
+    setSuggestLoading(true)
+    setActionMessage(null)
+    setPrReview(null)
+    setSuggestionContextLabel(`${job.name} 대응 가이드`)
+
+    try {
+      const payload = await apiFetch<SuggestResponse>(`/api/github/fix-sessions/${selectedRunId}/suggest`, {
+        method: 'POST',
+        body: JSON.stringify({
+          jobId: job.id,
+          jobName: job.name,
+          annotations: annotationSummaries.map((annotation) => ({
+            title: annotation.title,
+            message: annotation.message,
+            path: annotation.samplePath,
+            count: annotation.count,
+          })),
+        }),
+      })
+      setSuggestion(payload)
+      setActionMessage(
+        payload.llmStatus === 'failed' && payload.llmError
+          ? `Gemini 호출 실패로 rule-based 결과만 표시 중입니다. ${payload.llmError}`
+          : payload.message,
+      )
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'AI 도움 요청에 실패했습니다.')
+    } finally {
+      setSuggestLoading(false)
+    }
+  }
+
+  async function handleSuggestStep(job: WorkflowJob, step: WorkflowStep, stepLog: string, annotationSummaries: AnnotationSummary[]) {
+    if (!selectedRunId || !stepLog.trim()) {
+      return
+    }
+
+    setSuggestLoading(true)
+    setActionMessage(null)
+    setPrReview(null)
+    setSuggestionContextLabel(`${job.name} > ${step.name}`)
+
+    try {
+      const payload = await apiFetch<SuggestResponse>(`/api/github/fix-sessions/${selectedRunId}/suggest`, {
+        method: 'POST',
+        body: JSON.stringify({
+          jobId: job.id,
+          jobName: job.name,
+          stepName: step.name,
+          stepNumber: step.number,
+          stepStatus: step.status,
+          stepLog,
+          annotations: annotationSummaries.map((annotation) => ({
+            title: annotation.title,
+            message: annotation.message,
+            path: annotation.samplePath,
+            count: annotation.count,
+          })),
+        }),
+      })
+
+      setSuggestion(payload)
+      setActionMessage(
+        payload.llmStatus === 'failed' && payload.llmError
+          ? `Gemini 호출 실패로 rule-based 결과만 표시 중입니다. ${payload.llmError}`
+          : payload.message,
+      )
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Step AI 분석 요청에 실패했습니다.')
     } finally {
       setSuggestLoading(false)
     }
@@ -1037,7 +1481,11 @@ export default function GitActionsPage() {
     if (!selectedRunId) {
       setJobs([])
       setLogs([])
+      setAnnotations([])
+      setAnnotationsMeta(null)
+      setSelectedStepTarget(null)
       setSuggestion(null)
+      setSuggestionContextLabel(null)
       setPrReview(null)
       setExpandedJobIds([])
       setRunSummary(null)
@@ -1046,17 +1494,23 @@ export default function GitActionsPage() {
 
     setJobs([])
     setLogs([])
+    setAnnotations([])
+    setAnnotationsMeta(null)
+    setSelectedStepTarget(null)
     setSuggestion(null)
+    setSuggestionContextLabel(null)
     setPrReview(null)
     setExpandedJobIds([])
     setRunSummary(null)
     void loadRunDetail(selectedRunId)
     void loadRunSummary(selectedRunId)
     void loadRunLogs(selectedRunId)
+    void loadRunAnnotations(selectedRunId)
 
     const intervalId = window.setInterval(() => {
       void loadRunDetail(selectedRunId, true)
       void loadRunSummary(selectedRunId)
+      void loadRunAnnotations(selectedRunId)
     }, POLLING_INTERVAL_MS)
 
     return () => window.clearInterval(intervalId)
@@ -1084,11 +1538,13 @@ export default function GitActionsPage() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void handleRefresh()}
-              className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+              onClick={() => void handleFocusCurrentStep()}
+              disabled={!currentStepTarget || executeLoading || rerunLoading}
+              title="현재 진행 중인 step 위치로 이동합니다."
+              className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:border-gray-100 disabled:bg-gray-50 disabled:text-gray-400"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              새로고침
+              <Clock3 className="h-3.5 w-3.5" />
+              현재 작업 위치
             </button>
             <button
               type="button"
@@ -1159,7 +1615,10 @@ export default function GitActionsPage() {
             run={selectedRun}
             jobs={jobs}
             logs={logs}
+            annotations={annotations}
+            annotationsMeta={annotationsMeta}
             expandedJobIds={expandedJobIds}
+            selectedStepTarget={selectedStepTarget}
             loading={loadingDetail}
             error={detailError}
             onToggleJob={(jobId) =>
@@ -1167,10 +1626,16 @@ export default function GitActionsPage() {
                 current.includes(jobId) ? current.filter((value) => value !== jobId) : [...current, jobId],
               )
             }
+            onSelectStep={(job, step) => void handleSelectStep(job, step)}
             onCopyLogs={() => void handleCopyLogs()}
             onSuggest={() => void handleSuggest()}
+            onSuggestAnnotations={(job, annotationSummaries) => void handleSuggestAnnotations(job, annotationSummaries)}
+            onSuggestStep={(job, step, stepLog, annotationSummaries) =>
+              void handleSuggestStep(job, step, stepLog, annotationSummaries)
+            }
             suggestLoading={suggestLoading}
             suggestion={suggestion}
+            suggestionContextLabel={suggestionContextLabel}
             runSummary={runSummary}
             onApply={() => void handleApply()}
             applyLoading={applyLoading}
@@ -1258,22 +1723,24 @@ function WorkflowRunList({
               type="button"
               onClick={() => onSelect(run.id)}
               className={cn(
-                'w-full rounded-xl border p-4 text-left transition-colors',
+                'h-full min-h-[112px] w-full rounded-xl border p-4 text-left transition-colors',
                 selected
                   ? 'border-indigo-300 bg-indigo-50/70 shadow-sm'
                   : 'border-gray-200 hover:border-indigo-200 hover:bg-gray-50',
               )}
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
+              <div className="flex h-full items-start justify-between gap-3">
+                <div className="flex min-w-0 flex-1 flex-col">
                   <div className="flex items-start gap-2">
                     <div className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', presentation.dot)} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold text-gray-900">{run.name || 'Unnamed workflow'}</p>
-                      <p className="mt-1 text-sm leading-5 text-gray-600">{getWorkflowDescription(run.name || '')}</p>
+                      <p className="mt-1 truncate text-sm leading-5 text-gray-600" title={getWorkflowDescription(run.name || '')}>
+                        {getWorkflowDescription(run.name || '')}
+                      </p>
                     </div>
                   </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                  <div className="mt-auto flex flex-wrap items-center gap-2 pt-3 text-xs text-gray-400">
                     <span>{formatRelativeTime(run.createdAt)}</span>
                     <span>•</span>
                     <div className="flex items-center gap-1">
@@ -1282,7 +1749,12 @@ function WorkflowRunList({
                     </div>
                   </div>
                 </div>
-                <span className={cn('rounded-full px-2.5 py-1 text-[11px] font-medium', presentation.badge)}>
+                <span
+                  className={cn(
+                    'inline-flex h-6 min-w-[56px] items-center justify-center rounded-full px-2.5 py-1 text-[11px] font-medium leading-none',
+                    presentation.badge,
+                  )}
+                >
                   {presentation.label}
                 </span>
               </div>
@@ -1298,14 +1770,21 @@ interface RunDetailProps {
   run: WorkflowRun | null
   jobs: WorkflowJob[]
   logs: WorkflowJobLog[]
+  annotations: WorkflowAnnotation[]
+  annotationsMeta: WorkflowAnnotationsMeta | null
   expandedJobIds: number[]
+  selectedStepTarget: StepSelection | null
   loading: boolean
   error: string | null
   onToggleJob: (jobId: number) => void
+  onSelectStep: (job: WorkflowJob, step: WorkflowStep) => void
   onCopyLogs: () => void
   onSuggest: () => void
+  onSuggestAnnotations: (job: WorkflowJob, annotationSummaries: AnnotationSummary[]) => void
+  onSuggestStep: (job: WorkflowJob, step: WorkflowStep, stepLog: string, annotationSummaries: AnnotationSummary[]) => void
   suggestLoading: boolean
   suggestion: SuggestResponse | null
+  suggestionContextLabel: string | null
   runSummary: RunSummaryResponse | null
   onApply: () => void
   applyLoading: boolean
@@ -1319,14 +1798,21 @@ function RunDetail({
   run,
   jobs,
   logs,
+  annotations,
+  annotationsMeta,
   expandedJobIds,
+  selectedStepTarget,
   loading,
   error,
   onToggleJob,
+  onSelectStep,
   onCopyLogs,
   onSuggest,
+  onSuggestAnnotations,
+  onSuggestStep,
   suggestLoading,
   suggestion,
+  suggestionContextLabel,
   runSummary,
   onApply,
   applyLoading,
@@ -1336,6 +1822,9 @@ function RunDetail({
   prActionLoading,
 }: RunDetailProps) {
   const logByJobId = new Map(logs.map((log) => [log.jobId, log]))
+  const annotationsByJobId = new Map<number, WorkflowAnnotation[]>(
+    jobs.map((job) => [job.id, annotations.filter((annotation) => annotation.jobId === job.id)]),
+  )
   const summaryByJobId = new Map((runSummary?.jobs || []).map((js) => [js.jobId, js]))
   const [expandedLogJobIds, setExpandedLogJobIds] = useState<number[]>([])
 
@@ -1392,6 +1881,14 @@ function RunDetail({
                 <span>{run.actor || 'unknown'}</span>
                 <span>{formatDateTime(run.createdAt)}</span>
               </div>
+              {annotationsMeta && annotationsMeta.rawCount > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-amber-700">
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium">
+                    {annotationsMeta.source === 'github-api' ? 'GitHub API' : 'Annotations'}
+                  </span>
+                  <span>run 원본 annotation {annotationsMeta.rawCount}개</span>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -1424,9 +1921,21 @@ function RunDetail({
                 <div className="flex items-center gap-2">
                   <Sparkles className="h-4 w-4 shrink-0 text-amber-600" />
                   <p className="font-medium">
-                    AI 에러 분석
-                    {suggestion.mode === 'hybrid' && (
-                      <span className="ml-2 rounded bg-amber-200/60 px-1.5 py-0.5 text-[10px] font-normal uppercase">LLM + Rule</span>
+                    {suggestionContextLabel || 'AI 에러 분석'}
+                    {suggestion.llmStatus === 'success' && (
+                      <span className="ml-2 rounded bg-amber-200/60 px-1.5 py-0.5 text-[10px] font-normal uppercase">
+                        LLM + Rule
+                      </span>
+                    )}
+                    {suggestion.llmStatus === 'failed' && (
+                      <span className="ml-2 rounded bg-red-200/70 px-1.5 py-0.5 text-[10px] font-normal uppercase text-red-800">
+                        Rule fallback
+                      </span>
+                    )}
+                    {suggestion.llmStatus === 'not_attempted' && (
+                      <span className="ml-2 rounded bg-slate-200/80 px-1.5 py-0.5 text-[10px] font-normal uppercase text-slate-700">
+                        Rule only
+                      </span>
                     )}
                   </p>
                 </div>
@@ -1437,6 +1946,13 @@ function RunDetail({
               </div>
 
               {/* LLM 분석 결과 (새 프롬프트 형식) */}
+              {suggestion.llmError && (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <p className="font-medium">Gemini 호출 실패로 rule-based 분석만 표시 중</p>
+                  <p className="mt-1">{suggestion.llmError}</p>
+                </div>
+              )}
+
               {suggestion.llmAnalysis && (
                 <div className="mt-3 rounded-lg border border-amber-200 bg-white/70 p-3 text-sm leading-relaxed text-amber-950 whitespace-pre-wrap">
                   {suggestion.llmAnalysis}
@@ -1626,10 +2142,31 @@ function RunDetail({
         <div className="space-y-3">
           {jobs.map((job) => {
             const log = logByJobId.get(job.id)
+            const jobAnnotations = annotationsByJobId.get(job.id) || []
+            const jobAnnotationItems = buildAnnotationListItems(jobAnnotations, log?.content)
+            const jobAnnotationSummaries = summarizeAnnotations(jobAnnotationItems)
             const jobSummary = summaryByJobId.get(job.id)
             const tone = getStepTone(job.conclusion, job.status)
             const expanded = expandedJobIds.includes(job.id)
             const logExpanded = expandedLogJobIds.includes(job.id)
+            const timelineSteps = job.steps.map((step) => {
+              const summaryStep = jobSummary?.steps.find((candidate) => candidate.number === step.number)
+              return {
+                name: step.name,
+                number: step.number,
+                status: step.status,
+                conclusion: step.conclusion,
+                startedAt: step.startedAt,
+                completedAt: step.completedAt,
+                summary: summaryStep?.summary,
+                durationSeconds: summaryStep?.durationSeconds ?? null,
+              }
+            })
+            const selectedStep =
+              selectedStepTarget?.jobId === job.id
+                ? job.steps.find((step) => step.number === selectedStepTarget.stepNumber) || null
+                : null
+            const selectedStepLog = selectedStep ? buildStepLogContent(selectedStep, job.steps, log?.content) : ''
 
             return (
               <div key={job.id} className="overflow-hidden rounded-lg border border-gray-200">
@@ -1676,37 +2213,123 @@ function RunDetail({
                       )}
                     </div>
 
-                    {/* Step Timeline with summaries */}
-                    {jobSummary && jobSummary.steps.length > 0 ? (
+                    {/* Step Timeline with details */}
+                    {timelineSteps.length > 0 ? (
                       <div className="border-t border-gray-100 bg-white">
                         <StepTimeline
-                          steps={jobSummary.steps.map((s) => ({
-                            name: s.name,
-                            number: s.number,
-                            status: s.status,
-                            conclusion: s.conclusion,
-                            summary: s.summary,
-                            durationSeconds: s.durationSeconds,
-                          }))}
-                        />
-                      </div>
-                    ) : job.steps.length > 0 ? (
-                      <div className="border-t border-gray-100 bg-white">
-                        <StepTimeline
-                          steps={job.steps.map((s) => ({
-                            name: s.name,
-                            number: s.number,
-                            status: s.status,
-                            conclusion: s.conclusion,
-                            startedAt: s.startedAt,
-                            completedAt: s.completedAt,
-                          }))}
+                          steps={timelineSteps}
+                          activeStepNumber={selectedStep?.number ?? null}
+                          onStepClick={(step) => {
+                            const targetStep = job.steps.find((candidate) => candidate.number === step.number)
+                            if (targetStep) {
+                              void onSelectStep(job, targetStep)
+                            }
+                          }}
+                          stepDomIdPrefix={getWorkflowStepDomId(job.id, 0).replace(/-0$/, '')}
                         />
                       </div>
                     ) : null}
 
+                    {selectedStep && (
+                      <div className="border-t border-gray-100 bg-slate-50/70 px-4 py-4">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                              Step Details
+                            </p>
+                            <p className="mt-1 text-sm font-medium text-slate-900">
+                              {job.name} &gt; {selectedStep.name}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-500">
+                              {selectedStepLog
+                                ? `${parseLogLines(selectedStepLog).length} log lines`
+                                : '이 step에 매칭된 로그를 찾지 못했습니다.'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => onSuggestStep(job, selectedStep, selectedStepLog, jobAnnotationSummaries)}
+                            disabled={suggestLoading || !selectedStepLog}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            <Sparkles className="h-3.5 w-3.5" />
+                            {suggestLoading ? 'AI 분석중...' : '이 단계 AI 분석'}
+                          </button>
+                        </div>
+                        {selectedStepLog ? (
+                          <LogViewer jobId={job.id} content={selectedStepLog} />
+                        ) : (
+                          <div className="rounded-lg border border-dashed border-slate-200 bg-white px-4 py-6 text-sm text-slate-500">
+                            현재 step과 연결된 로그 구간을 찾지 못했습니다.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {jobAnnotationItems.length > 0 && (
+                      <div className="border-t border-gray-100 bg-amber-50/40 px-4 py-3">
+                        <div className="mb-3 flex items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">Annotations</p>
+                            <p className="mt-1 text-xs text-amber-600">
+                              {jobAnnotationItems.length} errors
+                              {jobAnnotationSummaries.length > 0 ? `, AI uses ${jobAnnotationSummaries.length} grouped items` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {jobAnnotations.length === 0 && (
+                              <span className="rounded-full bg-white px-2 py-1 text-[11px] text-amber-700">
+                                log-derived terminal errors
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onSuggestAnnotations(job, jobAnnotationSummaries)}
+                              disabled={suggestLoading || jobAnnotationSummaries.length === 0}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <Sparkles className="h-3.5 w-3.5" />
+                              {suggestLoading ? 'AI 분석중...' : 'AI 도움 받기'}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {jobAnnotationItems.map((annotation) => {
+                            const presentation = getAnnotationPresentation(annotation.annotationLevel)
+
+                            return (
+                              <div key={`${job.id}-annotation-${annotation.key}`} className="rounded-lg border border-amber-200 bg-white px-3 py-2.5">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-xs text-gray-500">{job.name}</p>
+                                    <p className="mt-1 text-sm leading-5 text-gray-800">
+                                      {annotation.title ? `${annotation.title}: "${annotation.message}"` : annotation.message}
+                                    </p>
+                                  </div>
+                                  <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium', presentation.badge)}>
+                                    {presentation.label}
+                                  </span>
+                                </div>
+                                {(annotation.path || annotation.startLine || annotation.source === 'job-error') && (
+                                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                                    {annotation.source === 'job-error' && <span>job terminal error</span>}
+                                    {annotation.path && (
+                                      <span>
+                                        {annotation.path}
+                                        {annotation.startLine ? `:${annotation.startLine}` : ''}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Log toggle */}
-                    <div className="border-t border-gray-100">
+                    <div className="hidden border-t border-gray-100">
                       <button
                         type="button"
                         onClick={() =>

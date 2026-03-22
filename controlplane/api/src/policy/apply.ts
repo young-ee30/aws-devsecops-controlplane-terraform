@@ -1,4 +1,4 @@
-import { createPullRequestFromFiles } from '../github/changes.js'
+import { commitFilesToDefaultBranch } from '../github/changes.js'
 
 export interface ApplyPolicyFileInput {
   policyPath: string
@@ -17,11 +17,6 @@ export interface ApplyPolicyResponse {
   fileCount: number
   branchName: string
   commitSha: string
-  pullRequest: {
-    number: number
-    htmlUrl: string
-    title: string
-  }
 }
 
 function createHttpError(status: number, message: string) {
@@ -87,21 +82,10 @@ export async function applyPolicyworkflow(input: ApplyPolicyRequest): Promise<Ap
 
   const firstFileName = policies[0]?.policyPath.split('/').pop() || 'policy.yaml'
   const slug = slugify(firstFileName) || `policy-${Date.now()}`
-  const result = await createPullRequestFromFiles({
+  const result = await commitFilesToDefaultBranch({
     runId: `policy-${Date.now()}`,
-    branchName: policies.length === 1 ? `policy/${slug}` : `policy/${slug}-bundle`,
     commitMessage:
       policies.length === 1 ? `policy: add ${firstFileName}` : `policy: add ${policies.length} custom policies`,
-    prTitle:
-      policies.length === 1
-        ? `Policy: ${policies[0]?.policyName || slug}`
-        : `Policies: add ${policies.length} custom checks`,
-    prBody: [
-      'Generated from the dashboard policy page.',
-      '',
-      `Files (${policies.length}):`,
-      ...policies.map((policy) => `- ${policy.policyPath}${policy.summary ? ` :: ${policy.summary}` : ''}`),
-    ].join('\n'),
     files: policies.map((policy) => ({
       path: policy.policyPath,
       content: policy.yaml,
@@ -114,6 +98,5 @@ export async function applyPolicyworkflow(input: ApplyPolicyRequest): Promise<Ap
     fileCount: policies.length,
     branchName: result.branchName,
     commitSha: result.commitSha,
-    pullRequest: result.pullRequest,
   }
 }

@@ -3,7 +3,8 @@ import { getRepoOctokit, getRepositoryMetadata } from './app.js'
 
 export interface ConfirmFileChange {
   path: string
-  content: string
+  content?: string
+  delete?: boolean
 }
 
 export interface ConfirmChangesInput {
@@ -13,6 +14,13 @@ export interface ConfirmChangesInput {
   commitMessage?: string
   prTitle?: string
   prBody?: string
+  files: ConfirmFileChange[]
+}
+
+export interface CommitFilesInput {
+  runId: string
+  branchName?: string
+  commitMessage?: string
   files: ConfirmFileChange[]
 }
 
@@ -59,6 +67,45 @@ async function reserveBranchName(baseBranch: string, requested?: string) {
   throw new Error('Failed to allocate a unique branch name')
 }
 
+async function buildTreeEntries(files: ConfirmFileChange[]) {
+  const octokit = await getRepoOctokit()
+
+  return Promise.all(
+    files.map(async (file) => {
+      if (!file.path.trim()) {
+        throw new Error('Each file change must include a path')
+      }
+
+      if (file.delete) {
+        return {
+          path: file.path,
+          mode: '100644' as const,
+          type: 'blob' as const,
+          sha: null,
+        }
+      }
+
+      if (typeof file.content !== 'string') {
+        throw new Error(`File change ${file.path} must include content unless delete=true`)
+      }
+
+      const blob = await octokit.request('POST /repos/{owner}/{repo}/git/blobs', {
+        owner: env.githubOwner,
+        repo: env.githubRepo,
+        content: encodeContent(file.content),
+        encoding: 'base64',
+      })
+
+      return {
+        path: file.path,
+        mode: '100644' as const,
+        type: 'blob' as const,
+        sha: blob.data.sha,
+      }
+    }),
+  )
+}
+
 export async function createPullRequestFromFiles(input: ConfirmChangesInput) {
   if (input.files.length === 0) {
     throw new Error('files must contain at least one file change')
@@ -79,27 +126,7 @@ export async function createPullRequestFromFiles(input: ConfirmChangesInput) {
     commit_sha: baseCommitSha,
   })
 
-  const tree = await Promise.all(
-    input.files.map(async (file) => {
-      if (!file.path.trim()) {
-        throw new Error('Each file change must include a path')
-      }
-
-      const blob = await octokit.request('POST /repos/{owner}/{repo}/git/blobs', {
-        owner: env.githubOwner,
-        repo: env.githubRepo,
-        content: encodeContent(file.content),
-        encoding: 'base64',
-      })
-
-      return {
-        path: file.path,
-        mode: '100644' as const,
-        type: 'blob' as const,
-        sha: blob.data.sha,
-      }
-    }),
-  )
+  const tree = await buildTreeEntries(input.files)
 
   const newTree = await octokit.request('POST /repos/{owner}/{repo}/git/trees', {
     owner: env.githubOwner,
@@ -143,5 +170,59 @@ export async function createPullRequestFromFiles(input: ConfirmChangesInput) {
       htmlUrl: pullRequest.data.html_url,
       title: pullRequest.data.title,
     },
+  }
+}
+
+export async function commitFilesToDefaultBranch(input: CommitFilesInput) {
+  if (input.files.length === 0) {
+    throw new Error('files must contain at least one file change')
+  }
+
+  const octokit = await getRepoOctokit()
+  const repository = await getRepositoryMetadata()
+  const branchName = input.branchName || repository.default_branch
+  const commitMessage = input.commitMessage || `ai fix: workflow run ${input.runId}`
+
+  const baseRef = await octokit.request('GET /repos/{owner}/{repo}/git/ref/{ref}', {
+    owner: env.githubOwner,
+    repo: env.githubRepo,
+    ref: `heads/${branchName}`,
+  })
+
+  const baseCommitSha = baseRef.data.object.sha
+  const baseCommit = await octokit.request('GET /repos/{owner}/{repo}/git/commits/{commit_sha}', {
+    owner: env.githubOwner,
+    repo: env.githubRepo,
+    commit_sha: baseCommitSha,
+  })
+
+  const tree = await buildTreeEntries(input.files)
+  const newTree = await octokit.request('POST /repos/{owner}/{repo}/git/trees', {
+    owner: env.githubOwner,
+    repo: env.githubRepo,
+    base_tree: baseCommit.data.tree.sha,
+    tree,
+  })
+
+  const commit = await octokit.request('POST /repos/{owner}/{repo}/git/commits', {
+    owner: env.githubOwner,
+    repo: env.githubRepo,
+    message: commitMessage,
+    tree: newTree.data.sha,
+    parents: [baseCommitSha],
+  })
+
+  await octokit.request('PATCH /repos/{owner}/{repo}/git/refs/{ref}', {
+    owner: env.githubOwner,
+    repo: env.githubRepo,
+    ref: `heads/${branchName}`,
+    sha: commit.data.sha,
+    force: false,
+  })
+
+  return {
+    ok: true,
+    branchName,
+    commitSha: commit.data.sha,
   }
 }

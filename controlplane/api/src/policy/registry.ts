@@ -141,6 +141,11 @@ export async function listRegistryPolicies() {
   return store.policies
 }
 
+export async function getRegistryPolicy(id: string) {
+  const store = await readStore()
+  return store.policies.find((policy) => policy.id === id) || null
+}
+
 export async function createRegistryPolicies(input: RegistryPolicy[]) {
   const store = await readStore()
   const existingIds = new Set(store.policies.map((policy) => policy.id))

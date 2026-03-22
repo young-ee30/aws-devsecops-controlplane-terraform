@@ -14,12 +14,45 @@ interface ConfirmRequestBody {
   }>
 }
 
+interface SuggestRequestBody {
+  jobId?: number
+  jobName?: string
+  stepName?: string
+  stepNumber?: number
+  stepStatus?: string
+  stepLog?: string
+  annotations?: Array<{
+    title?: string | null
+    message?: string | null
+    path?: string | null
+    count?: number | null
+  }>
+}
+
 export const fixRouter = Router()
 
 fixRouter.post('/api/github/fix-sessions/:runId/suggest', async (req, res, next) => {
   try {
     const runId = req.params.runId
-    const suggestion = await generateFixSuggestion(runId)
+    const body = (req.body || {}) as SuggestRequestBody
+    const suggestion = await generateFixSuggestion(runId, {
+      jobId: typeof body.jobId === 'number' && !Number.isNaN(body.jobId) ? body.jobId : undefined,
+      jobName: typeof body.jobName === 'string' ? body.jobName : undefined,
+      stepName: typeof body.stepName === 'string' ? body.stepName : undefined,
+      stepNumber: typeof body.stepNumber === 'number' && !Number.isNaN(body.stepNumber) ? body.stepNumber : undefined,
+      stepStatus: typeof body.stepStatus === 'string' ? body.stepStatus : undefined,
+      stepLog: typeof body.stepLog === 'string' ? body.stepLog : undefined,
+      annotations: Array.isArray(body.annotations)
+        ? body.annotations
+          .map((annotation) => ({
+            title: typeof annotation?.title === 'string' ? annotation.title : null,
+            message: typeof annotation?.message === 'string' ? annotation.message : null,
+            path: typeof annotation?.path === 'string' ? annotation.path : null,
+            count: typeof annotation?.count === 'number' && !Number.isNaN(annotation.count) ? annotation.count : null,
+          }))
+          .filter((annotation) => annotation.title || annotation.message)
+        : undefined,
+    })
     res.json(suggestion)
   } catch (error) {
     next(error)

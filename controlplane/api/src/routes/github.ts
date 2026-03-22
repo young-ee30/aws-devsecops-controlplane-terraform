@@ -2,6 +2,7 @@ import { Router } from 'express'
 import {
   dispatchFullPipeline,
   dispatchWorkflow,
+  getWorkflowRunAnnotations,
   getWorkflowRunJobs,
   getWorkflowRunLogs,
   listWorkflowRuns,
@@ -66,6 +67,21 @@ githubRouter.get('/api/github/runs/:runId/jobs', async (req, res, next) => {
 
     const jobs = await getWorkflowRunJobs(runId)
     res.json({ runId, jobs })
+  } catch (error) {
+    next(error)
+  }
+})
+
+githubRouter.get('/api/github/runs/:runId/annotations', async (req, res, next) => {
+  try {
+    const runId = Number(req.params.runId)
+    if (Number.isNaN(runId)) {
+      res.status(400).json({ error: 'runId must be a number' })
+      return
+    }
+
+    const annotations = await getWorkflowRunAnnotations(runId)
+    res.json(annotations)
   } catch (error) {
     next(error)
   }

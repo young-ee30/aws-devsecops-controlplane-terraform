@@ -9,7 +9,6 @@ import {
   EyeOff,
   FilePlus,
   FileText,
-  RefreshCw,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -19,8 +18,7 @@ import {
 import { PageHeader } from '@/components/layout/Header'
 import ChartCard from '@/components/common/ChartCard'
 import { type PolicyStatus, type PolicyTemplate } from '@/data/mockData'
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || 'http://localhost:4000'
+import { API_BASE_URL } from '@/lib/env'
 
 type ProviderLabel = 'gemini' | 'fallback'
 type PolicySeverity = 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
@@ -102,7 +100,16 @@ interface ApplyPolicyResponse {
   fileCount: number
   branchName: string
   commitSha: string
-  pullRequest: ApplyPullRequest
+  pullRequest?: ApplyPullRequest | null
+}
+
+interface DeletePolicyResponse {
+  ok: boolean
+  deleted: boolean
+  githubFileDeleted: boolean
+  branchName?: string
+  commitSha?: string
+  pullRequest?: ApplyPullRequest | null
 }
 
 const legacyPolicyStatusStyles: Record<PolicyStatus, { label: string; className: string }> = {
@@ -124,6 +131,7 @@ const policyStatusStyles: Record<PolicyStatus, { label: string; className: strin
 }
 void legacyPolicyStatusStyles
 void legacyPolicyStatusStyles2
+void policyStatusStyles
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -265,41 +273,56 @@ function buildStoredPolicy(
   }
 }
 
+function getPreviewPolicyTitle(policy: GeneratedPolicyItem) {
+  const sourceId = policy.sourcePolicyId?.trim()
+  if (sourceId) {
+    return `정책 ${sourceId.toLowerCase()}`
+  }
+
+  return policy.policyName
+}
+
+function getPolicyFileName(policyPath: string) {
+  return policyPath.split('/').pop() || policyPath
+}
+
 function BatchPreviewList({
   policies,
   openId,
   copiedId,
+  createdPolicyIds,
   onToggleOpen,
   onCopyYaml,
+  onCreatePolicy,
 }: {
   policies: GeneratedPolicyItem[]
   openId: string | null
   copiedId: string | null
+  createdPolicyIds: string[]
   onToggleOpen: (policyId: string) => void
   onCopyYaml: (policy: GeneratedPolicyItem) => void
+  onCreatePolicy: (policy: GeneratedPolicyItem) => void
 }) {
   return (
     <div className="space-y-4">
       {policies.map((policy) => {
         const isOpen = openId === policy.policyId
+        const isCreated = createdPolicyIds.includes(policy.policyId)
 
         return (
           <div key={policy.policyId} className="overflow-hidden rounded-xl border border-gray-200 bg-white">
             <div className="border-b border-gray-100 bg-gray-50 px-5 py-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-gray-900">{policy.policyName}</p>
-                  {(policy.sourcePolicyId || policy.sourcePolicyTitle) && (
-                    <p className="mt-1 text-xs text-gray-500">
-                      {[policy.sourcePolicyId, policy.sourcePolicyTitle].filter(Boolean).join(' / ')}
-                    </p>
-                  )}
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(240px,0.85fr)]">
+                <div className="min-w-0 lg:max-w-2xl">
+                  <p className="text-sm font-semibold text-gray-900">{getPreviewPolicyTitle(policy)}</p>
                   <p className="mt-2 text-sm leading-6 text-gray-600">{policy.description}</p>
                   <p className="mt-2 text-xs text-gray-500">{policy.summary}</p>
                 </div>
-                <span className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-600">
-                  {policy.policyPath}
-                </span>
+                <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3">
+                  <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-500">Policy File</p>
+                  <p className="mt-2 text-sm font-semibold text-gray-900">{getPolicyFileName(policy.policyPath)}</p>
+                  <p className="mt-1 text-xs text-gray-500">Checkov custom policy 파일</p>
+                </div>
               </div>
             </div>
 
@@ -320,7 +343,7 @@ function BatchPreviewList({
               </div>
 
               {isOpen && (
-                <pre className="max-h-72 overflow-auto rounded-xl border border-gray-700 bg-gray-950 p-4 font-mono text-xs leading-relaxed text-gray-100">
+                <pre className="max-h-72 overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 font-mono text-xs leading-relaxed text-slate-800 shadow-inner">
                   {policy.yaml}
                 </pre>
               )}
@@ -340,6 +363,14 @@ function BatchPreviewList({
                   {copiedId === policy.policyId ? <Check className="h-3.5 w-3.5 text-indigo-600" /> : <Copy className="h-3.5 w-3.5" />}
                   {copiedId === policy.policyId ? '복사됨' : 'YAML 복사'}
                 </button>
+                <button
+                  onClick={() => onCreatePolicy(policy)}
+                  disabled={isCreated}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isCreated ? <CheckCircle2 className="h-3.5 w-3.5" /> : <FilePlus className="h-3.5 w-3.5" />}
+                  {isCreated ? '목록 추가됨' : '정책 목록 추가'}
+                </button>
               </div>
             </div>
           </div>
@@ -356,17 +387,18 @@ function PolicyUploadCard({
 }: {
   onCreate: (policies: StoredPolicy[]) => Promise<void>
   onApplyDraft: (policies: ApplyPolicyPayload[]) => Promise<ApplyPolicyResponse>
-  onBatchApplied: (policyPaths: string[], pullRequest: ApplyPullRequest) => void
+  onBatchApplied: (policyPaths: string[], pullRequest?: ApplyPullRequest | null) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<GeneratedPolicyResponse | null>(null)
   const [generating, setGenerating] = useState(false)
-  const [created, setCreated] = useState(false)
-  const [copiedAll, setCopiedAll] = useState(false)
+  const [createdPolicyIds, setCreatedPolicyIds] = useState<string[]>([])
   const [copiedPolicyId, setCopiedPolicyId] = useState<string | null>(null)
   const [openPreviewId, setOpenPreviewId] = useState<string | null>(null)
+  const [created, setCreated] = useState(false)
+  const [copiedAll, setCopiedAll] = useState(false)
   const [applying, setApplying] = useState(false)
   const [applyResult, setApplyResult] = useState<ApplyPolicyResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -374,12 +406,10 @@ function PolicyUploadCard({
 
   const analyzeFile = async (file: File) => {
     setGenerating(true)
-    setCreated(false)
-    setCopiedAll(false)
+    setCreatedPolicyIds([])
     setCopiedPolicyId(null)
     setOpenPreviewId(null)
     setPreview(null)
-    setApplyResult(null)
     setError(null)
 
     try {
@@ -417,12 +447,9 @@ function PolicyUploadCard({
     setSelectedFile(null)
     setPreview(null)
     setGenerating(false)
-    setCreated(false)
-    setCopiedAll(false)
+    setCreatedPolicyIds([])
     setCopiedPolicyId(null)
     setOpenPreviewId(null)
-    setApplying(false)
-    setApplyResult(null)
     setError(null)
 
     if (inputRef.current) {
@@ -472,6 +499,18 @@ function PolicyUploadCard({
     }
   }
 
+  const handleCreatePolicy = async (policy: GeneratedPolicyItem) => {
+    if (!selectedFile || !preview) return
+
+    try {
+      await onCreate([buildStoredPolicy(selectedFile.name, policy, preview.mode === 'llm' ? preview.provider : 'fallback')])
+      setCreatedPolicyIds((current) => (current.includes(policy.policyId) ? current : [...current, policy.policyId]))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '?뺤콉 ??μ뿉 ?ㅽ뙣?덉뒿?덈떎.'
+      setError(message)
+    }
+  }
+
   const handleApply = async () => {
     if (!preview) return
 
@@ -488,7 +527,7 @@ function PolicyUploadCard({
         })),
       )
       setApplyResult(result)
-      onBatchApplied(result.policyPaths, result.pullRequest)
+      onBatchApplied(result.policyPaths, result.pullRequest || null)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'GitHub 적용에 실패했습니다.'
       setError(message)
@@ -600,30 +639,29 @@ function PolicyUploadCard({
                   <CheckCircle2 className="h-4 w-4 text-indigo-600" />
                   <p className="text-sm font-medium text-indigo-700">Checkov custom policy 생성 완료</p>
                 </div>
-                <p className="mt-1 text-sm text-gray-600">{preview.summary}</p>
               </div>
               <span className="rounded-lg border border-gray-200 bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">
                 생성 {preview.policyCount}건
               </span>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[128px_128px_minmax(0,1fr)]">
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-center">
                 <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-500">Generated</p>
                 <p className="mt-1 text-lg font-semibold text-gray-900">{preview.policyCount}</p>
                 <p className="mt-1 text-xs text-gray-500">생성된 Checkov 정책</p>
               </div>
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-center">
                 <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-500">Skipped</p>
                 <p className="mt-1 text-lg font-semibold text-gray-900">{preview.skippedPolicies?.length || 0}</p>
                 <p className="mt-1 text-xs text-gray-500">YAML로 만들지 않은 원문 정책</p>
               </div>
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <div className="hidden rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
                 <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-500">Provider</p>
                 <p className="mt-1 text-lg font-semibold text-gray-900">{getProviderLabel(preview.provider)}</p>
                 <p className="mt-1 text-xs text-gray-500">정책 생성 모델</p>
               </div>
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-center">
                 <p className="text-xs font-medium uppercase tracking-[0.14em] text-gray-500">Source File</p>
                 <p className="mt-1 break-all text-sm font-medium text-gray-900">{preview.fileName}</p>
                 <p className="mt-1 text-xs text-gray-500">업로드한 문서</p>
@@ -675,8 +713,8 @@ function PolicyUploadCard({
               </div>
             )}
 
-            {applyResult && (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+            {applyResult?.pullRequest ? (
+              <div className="hidden rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium text-emerald-700">GitHub 반영 완료</p>
@@ -695,10 +733,10 @@ function PolicyUploadCard({
                   </a>
                 </div>
               </div>
-            )}
+            ) : null}
 
 
-            <div className="flex flex-wrap gap-2">
+            <div className="hidden flex-wrap gap-2">
               <button
                 onClick={handleCopyAllYaml}
                 className="flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100"
@@ -734,8 +772,10 @@ function PolicyUploadCard({
               policies={preview.policies}
               openId={openPreviewId}
               copiedId={copiedPolicyId}
+              createdPolicyIds={createdPolicyIds}
               onToggleOpen={(policyId) => setOpenPreviewId((current) => (current === policyId ? null : policyId))}
               onCopyYaml={(policy) => void handleCopyYaml(policy)}
+              onCreatePolicy={(policy) => void handleCreatePolicy(policy)}
             />
           </div>
         )}
@@ -747,15 +787,15 @@ function PolicyUploadCard({
 function PolicyList({
   policies,
   applyingId,
-  onToggleStatus,
+  deletingId,
   onDelete,
-  onApply,
+  onToggleStatus,
 }: {
   policies: StoredPolicy[]
   applyingId: string | null
-  onToggleStatus: (id: string) => void
+  deletingId: string | null
   onDelete: (id: string) => void
-  onApply: (id: string) => void
+  onToggleStatus: (id: string) => void
 }) {
   const [openYamlId, setOpenYamlId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -782,9 +822,14 @@ function PolicyList({
   return (
     <div className="space-y-4">
       {policies.map((policy) => {
-        const status = policyStatusStyles[policy.status]
+        const isActive = policy.status === 'active'
+        const statusLabel = isActive ? '활성' : '비활성'
+        const statusClassName = isActive
+          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+          : 'border-slate-200 bg-slate-100 text-slate-600'
         const isOpen = openYamlId === policy.id
         const isApplying = applyingId === policy.id
+        const isDeleting = deletingId === policy.id
 
         return (
           <div key={policy.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white">
@@ -801,20 +846,16 @@ function PolicyList({
                     </div>
                   </div>
                   <p className="mt-3 text-sm text-gray-600">{policy.description}</p>
-                  <p className="mt-2 text-xs text-gray-500">
-                    경로: {policy.policyPath} · 공급자: {getProviderLabel(policy.provider)} · ID: {policy.policyId}
-                  </p>
                 </div>
-                <span className={`rounded-full border px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>
+                <span className={`inline-flex h-6 shrink-0 items-center justify-center whitespace-nowrap rounded-full border px-2.5 text-[11px] leading-none ${statusClassName}`}>{statusLabel}</span>
               </div>
             </div>
 
             <div className="space-y-4 px-5 py-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 {[
                   { label: '카테고리', value: policy.category },
                   { label: '심각도', value: policy.severity },
-                  { label: '대상', value: policy.targetProvider },
                   { label: '마지막 갱신', value: policy.lastUpdated },
                 ].map((item) => (
                   <div key={item.label} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-center">
@@ -824,7 +865,8 @@ function PolicyList({
                 ))}
               </div>
 
-              {policy.appliedPullRequest && (
+              {/*
+              {false && policy.appliedPullRequest && (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -832,7 +874,7 @@ function PolicyList({
                       <p className="mt-1 text-xs text-emerald-700/80">PR #{policy.appliedPullRequest.number} 에 custom policy 파일이 등록되어 있습니다.</p>
                     </div>
                     <a
-                      href={policy.appliedPullRequest.htmlUrl}
+                      href={policy.appliedPullRequest!.htmlUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-3 py-2 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100"
@@ -843,9 +885,10 @@ function PolicyList({
                   </div>
                 </div>
               )}
+              */}
 
               {isOpen && (
-                <pre className="max-h-56 overflow-auto rounded-xl border border-gray-700 bg-gray-950 p-4 font-mono text-xs leading-relaxed text-gray-100">
+                <pre className="max-h-56 overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 font-mono text-xs leading-relaxed text-slate-800 shadow-inner">
                   {policy.yaml}
                 </pre>
               )}
@@ -866,25 +909,33 @@ function PolicyList({
                   {copiedId === policy.id ? '복사됨' : '복사'}
                 </button>
                 <button
-                  onClick={() => onApply(policy.id)}
+                  onClick={() => onToggleStatus(policy.id)}
                   disabled={isApplying}
-                  className="flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-[0] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                    isActive
+                      ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  }`}
                 >
                   <Sparkles className="h-3.5 w-3.5" />
+                  <span className="text-xs">{isApplying ? (isActive ? '비활성화 중...' : '활성화 중...') : isActive ? '비활성화' : '활성화'}</span>
                   {isApplying ? '적용 중...' : 'GitHub 적용'}
                 </button>
                 <button
-                  onClick={() => onToggleStatus(policy.id)}
-                  className="flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700 transition-colors hover:bg-indigo-100"
+                  onClick={() => undefined}
+                  className="hidden"
                 >
-                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span />
                   {policy.status === 'active' ? '정책 중지' : '정책 활성화'}
                 </button>
                 <button
                   onClick={() => onDelete(policy.id)}
-                  className="ml-auto flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 transition-colors hover:bg-red-100"
+                  disabled={isDeleting}
+                  className="ml-auto flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[0] text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
+                  <span className="text-xs">{isDeleting ? '삭제 중...' : '삭제'}</span>
+                  <span>{isDeleting ? '삭제 중...' : '삭제'}</span>
                   삭제
                 </button>
               </div>
@@ -899,7 +950,7 @@ function PolicyList({
 export default function PolicyPage() {
   const [policies, setPolicies] = useState<StoredPolicy[]>([])
   const [applyingId, setApplyingId] = useState<string | null>(null)
-  const activePolicyCount = policies.filter((policy) => policy.status === 'active').length
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -937,14 +988,16 @@ export default function PolicyPage() {
     setPolicies((current) => [...result.policies, ...current.filter((policy) => !result.policies.some((created) => created.id === policy.id))])
   }
 
-  const handleBatchApplied = (policyPaths: string[], pullRequest: ApplyPullRequest) => {
+  const handleBatchApplied = (policyPaths: string[], pullRequest?: ApplyPullRequest | null) => {
     setPolicies((current) => {
+      const lastUpdated = formatTimestamp()
       const next = current.map((policy) =>
         policyPaths.includes(policy.policyPath)
           ? {
               ...policy,
-              appliedPullRequest: pullRequest,
-              lastUpdated: formatTimestamp(),
+              status: 'active' as PolicyStatus,
+              appliedPullRequest: pullRequest || null,
+              lastUpdated,
             }
           : policy,
       )
@@ -953,7 +1006,8 @@ export default function PolicyPage() {
         void apiFetch<RegistryPolicyResponse>(`/api/policies/registry/${policy.id}`, {
           method: 'PATCH',
           body: JSON.stringify({
-            appliedPullRequest: policy.appliedPullRequest,
+            status: policy.status,
+            appliedPullRequest: policy.appliedPullRequest ?? null,
             lastUpdated: policy.lastUpdated,
           }),
         })
@@ -963,48 +1017,46 @@ export default function PolicyPage() {
     })
   }
 
-  const handleTogglePolicyStatus = (id: string) => {
-    setPolicies((current) => {
-      const next = current.map((policy) =>
-        policy.id === id
-          ? {
-              ...policy,
-              status: (policy.status === 'active' ? 'paused' : 'active') as PolicyStatus,
-              lastUpdated: formatTimestamp(),
-            }
-          : policy,
-      )
-
-      const target = next.find((policy) => policy.id === id)
-      if (target) {
-        void apiFetch<RegistryPolicyResponse>(`/api/policies/registry/${id}`, {
-          method: 'PATCH',
-          body: JSON.stringify({
-            status: target.status,
-            lastUpdated: target.lastUpdated,
-          }),
-        })
-      }
-
-      return next
-    })
-  }
-
-  const handleDeletePolicy = (id: string) => {
-    setPolicies((current) => current.filter((policy) => policy.id !== id))
-    void apiFetch<{ ok: boolean }>(`/api/policies/registry/${id}`, {
-      method: 'DELETE',
-    })
-  }
-
-  const handleApplyPolicy = async (id: string) => {
+  const handleTogglePolicyStatus = async (id: string) => {
     const target = policies.find((policy) => policy.id === id)
     if (!target) return
 
     setApplyingId(id)
 
     try {
-      const result = await apiFetch<ApplyPolicyResponse>('/api/policies/apply', {
+      if (target.status === 'active') {
+        await apiFetch<DeletePolicyResponse>('/api/policies/deactivate', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        })
+
+        const lastUpdated = formatTimestamp()
+        setPolicies((current) =>
+          current.map((policy) =>
+            policy.id === id
+              ? {
+                  ...policy,
+                  status: 'paused' as PolicyStatus,
+                  appliedPullRequest: null,
+                  lastUpdated,
+                }
+              : policy,
+          ),
+        )
+
+        void apiFetch<RegistryPolicyResponse>(`/api/policies/registry/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            status: 'paused',
+            appliedPullRequest: null,
+            lastUpdated,
+          }),
+        })
+
+        return
+      }
+
+      await apiFetch<ApplyPolicyResponse>('/api/policies/apply', {
         method: 'POST',
         body: JSON.stringify({
           policies: [
@@ -1024,21 +1076,46 @@ export default function PolicyPage() {
           policy.id === id
             ? {
                 ...policy,
-                appliedPullRequest: result.pullRequest,
+                status: 'active' as PolicyStatus,
+                appliedPullRequest: null,
                 lastUpdated,
               }
             : policy,
         ),
       )
+
       void apiFetch<RegistryPolicyResponse>(`/api/policies/registry/${id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          appliedPullRequest: result.pullRequest,
+          status: 'active',
+          appliedPullRequest: null,
           lastUpdated,
         }),
       })
     } finally {
       setApplyingId(null)
+    }
+  }
+
+  const handleDeletePolicy = async (id: string) => {
+    const target = policies.find((policy) => policy.id === id)
+    if (!target) return
+
+    const confirmedMessage = `정책 "${target.name}" 을(를) 삭제할까요?\n\n목록에서 제거되고, GitHub에는 ${target.policyPath} 가 기본 브랜치에서 바로 삭제됩니다.`
+    const confirmed = window.confirm(confirmedMessage) /*
+      `정책 "${target.name}" 을(를) 삭제할까요?\n\n목록에서 제거되고, GitHub에는 ${target.policyPath} 삭제 PR이 생성됩니다.`,
+    ) */
+    if (!confirmed) return
+
+    setDeletingId(id)
+
+    try {
+      await apiFetch<DeletePolicyResponse>(`/api/policies/registry/${id}`, {
+        method: 'DELETE',
+      })
+      setPolicies((current) => current.filter((policy) => policy.id !== id))
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -1053,8 +1130,8 @@ export default function PolicyPage() {
             <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-medium text-gray-600">
               등록 {policies.length}
             </span>
-            <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-              활성 {activePolicyCount}
+            <span className="hidden items-center rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+              활성 0
             </span>
           </div>
         }
@@ -1070,9 +1147,9 @@ export default function PolicyPage() {
           <PolicyList
             policies={policies}
             applyingId={applyingId}
-            onToggleStatus={handleTogglePolicyStatus}
+            deletingId={deletingId}
             onDelete={handleDeletePolicy}
-            onApply={(id) => void handleApplyPolicy(id)}
+            onToggleStatus={(id) => void handleTogglePolicyStatus(id)}
           />
         </ChartCard>
       </div>

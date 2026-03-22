@@ -5,6 +5,7 @@ import { callConfiguredLlm } from '../llm/client.js'
 type WorkflowJob = Awaited<ReturnType<typeof getWorkflowRunJobs>>[number]
 type WorkflowJobLog = Awaited<ReturnType<typeof getWorkflowRunLogs>>['logs'][number]
 type RiskLevel = 'low' | 'medium' | 'high'
+type LlmStatus = 'not_attempted' | 'success' | 'failed'
 
 interface CandidateFile {
   path: string
@@ -27,12 +28,31 @@ interface SuggestedFile {
   content: string
 }
 
+interface AnnotationSummaryInput {
+  title: string | null
+  message: string | null
+  path: string | null
+  count: number | null
+}
+
+interface GenerateFixSuggestionOptions {
+  jobId?: number
+  jobName?: string
+  stepName?: string
+  stepNumber?: number
+  stepStatus?: string
+  stepLog?: string
+  annotations?: AnnotationSummaryInput[]
+}
+
 export interface FixSuggestionResponse {
   ok: true
   runId: string
   message: string
   mode: 'rule-based' | 'llm' | 'hybrid'
   configuredModel?: string
+  llmStatus: LlmStatus
+  llmError?: string
   summary: string
   rootCause: string
   riskLevel: RiskLevel
@@ -70,6 +90,14 @@ function uniqueByPath(items: CandidateFile[]): CandidateFile[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))]
+}
+
+function normalizeAnnotationInputs(annotations?: AnnotationSummaryInput[]): AnnotationSummaryInput[] {
+  if (!annotations) {
+    return []
+  }
+
+  return annotations.filter((annotation) => annotation.title || annotation.message)
 }
 
 function buildMessage(draft: SuggestionDraft): string {
@@ -141,6 +169,67 @@ function detectWorkflowFiles(logText: string, jobs: WorkflowJob[]): CandidateFil
   }
 
   return uniqueByPath(files)
+}
+
+function normalizeCandidatePath(rawPath: string): string | null {
+  const normalized = rawPath.trim().replace(/^['"`]+|['"`]+$/g, '').replace(/\\/g, '/').replace(/^\/+/, '')
+  return normalized.length > 0 ? normalized : null
+}
+
+function detectCandidateFilesFromStepLog(logText: string): CandidateFile[] {
+  const files: CandidateFile[] = []
+  const explicitFilePatterns = [
+    /(?:^|\s)File:\s+([^\s:]+\.tf(?:vars)?)(?::\d+(?:-\d+)?)?/gim,
+    /(?:^|\s)Calling File:\s+([^\s:]+\.tf(?:vars)?)(?::\d+(?:-\d+)?)?/gim,
+    /([A-Za-z0-9_./-]+\.tf(?:vars)?)/g,
+    /(\.github\/workflows\/[A-Za-z0-9_./-]+\.ya?ml)/g,
+  ]
+
+  for (const pattern of explicitFilePatterns) {
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(logText)) !== null) {
+      const path = normalizeCandidatePath(match[1] || '')
+      if (!path) {
+        continue
+      }
+
+      files.push({
+        path,
+        reason: '선택한 step 로그에서 직접 언급된 파일입니다.',
+      })
+    }
+  }
+
+  return uniqueByPath(files)
+}
+
+function buildCheckovAnnotationDraft(
+  jobName: string | undefined,
+  annotations: AnnotationSummaryInput[],
+): SuggestionDraft {
+  const candidateFiles = uniqueByPath(
+    annotations
+      .filter((annotation) => typeof annotation.path === 'string' && annotation.path.trim().length > 0)
+      .map((annotation) => ({
+        path: annotation.path!.trim(),
+        reason: 'Checkov 점검에서 직접 지목된 Terraform 파일입니다.',
+      })),
+  )
+
+  return {
+    ruleId: 'checkov-annotations',
+    title: 'Checkov 보안 정책 점검',
+    summary: `${jobName || 'Terraform Plan & Security Scan'}에서 보안 정책 ${annotations.length}개가 기준을 통과하지 못했습니다.`,
+    rootCause: 'Terraform 리소스 설정 일부가 Checkov와 AWS 보안 기준을 만족하지 않아 암호화, 네트워크 노출, 로깅, 삭제 보호 같은 항목에서 실패했습니다.',
+    riskLevel: 'medium',
+    nextActions: [
+      '공개 노출, 암호화, 로깅 누락처럼 영향이 큰 항목부터 우선 수정합니다.',
+      'Annotations에 나온 Terraform 파일과 모듈 설정을 보강한 뒤 다시 plan을 실행합니다.',
+      '예외로 둘 항목은 skip 처리 전에 설계로 완화할 수 있는지 먼저 검토합니다.',
+    ],
+    candidateFiles,
+    patchIdea: 'Annotations에 나온 Terraform 파일을 중심으로 보안 설정을 보완하고 다시 Checkov를 실행합니다.',
+  }
 }
 
 function matchSuggestionRule(logText: string, jobs: WorkflowJob[]): SuggestionDraft {
@@ -340,14 +429,23 @@ function parseSuggestedFiles(llmResponse: string): SuggestedFile[] {
 async function callLlmAnalysis(
   logText: string,
   ruleBasedSummary: string,
+  annotationSummary: string,
+  stepContext: string,
   terraformContext: string,
-): Promise<{ analysis: string | null; suggestedFiles: SuggestedFile[] }> {
-  if (!env.llmApiKey) return { analysis: null, suggestedFiles: [] }
+): Promise<{ analysis: string | null; suggestedFiles: SuggestedFile[]; error?: string }> {
+  if (!env.llmApiKey) {
+    return {
+      analysis: null,
+      suggestedFiles: [],
+      error: 'Gemini is not configured. Set LLM_API_KEY or GEMINI_API_KEY.',
+    }
+  }
 
   const truncatedLog = logText.length > 12000 ? logText.slice(-12000) : logText
 
   const systemPrompt = `당신은 AWS 클라우드 아키텍처 및 Terraform 프로비저닝에 정통한 시니어 DevOps 엔지니어입니다.
 현재 CI/CD PIPELINE(GitHub Actions)에서 Terraform 코드를 실행하던 중 에러가 발생했습니다.
+선택된 step 정보가 주어지면 반드시 그 step이 하려던 작업, 실패 지점, 관련 workflow/Terraform 코드에 집중해서 분석하세요.
 
 아래 제공된 [에러 로그]와 [관련 Terraform 코드]를 분석하여 다음 형식에 맞춰 답변해 주세요.
 
@@ -368,7 +466,9 @@ async function callLlmAnalysis(
 # 수정된 전체 코드
 \`\`\``
 
-  const userPrompt = `Rule-based 사전 분석: ${ruleBasedSummary}
+  const userPrompt = `${stepContext}${stepContext ? '\n\n' : ''}Rule-based 사전 분석: ${ruleBasedSummary}
+
+${annotationSummary}
 
 [에러 로그]
 \`\`\`
@@ -386,7 +486,11 @@ ${truncatedLog}
     })
 
     if (!response?.content) {
-      return { analysis: null, suggestedFiles: [] }
+      return {
+        analysis: null,
+        suggestedFiles: [],
+        error: 'Gemini returned no usable content.',
+      }
     }
 
     const content = response.content
@@ -394,12 +498,16 @@ ${truncatedLog}
 
     return { analysis: content, suggestedFiles }
   } catch (error) {
-    console.error('LLM API call failed:', error instanceof Error ? error.message : error)
-    return { analysis: null, suggestedFiles: [] }
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('LLM API call failed:', message)
+    return { analysis: null, suggestedFiles: [], error: message }
   }
 }
 
-export async function generateFixSuggestion(runId: string): Promise<FixSuggestionResponse> {
+export async function generateFixSuggestion(
+  runId: string,
+  options?: GenerateFixSuggestionOptions,
+): Promise<FixSuggestionResponse> {
   const parsedRunId = Number(runId)
 
   if (Number.isNaN(parsedRunId)) {
@@ -408,7 +516,7 @@ export async function generateFixSuggestion(runId: string): Promise<FixSuggestio
 
   const [jobs, logsResponse] = await Promise.all([
     getWorkflowRunJobs(parsedRunId),
-    getWorkflowRunLogs(parsedRunId),
+    getWorkflowRunLogs(parsedRunId, options?.jobId),
   ])
 
   const normalizedLogs = logsResponse.logs.map((log) => ({
@@ -416,25 +524,79 @@ export async function generateFixSuggestion(runId: string): Promise<FixSuggestio
     content: normalizeText(log.content),
   }))
 
-  const joinedLogText = normalizedLogs
-    .map((log) => [`# ${log.name}`, log.content].join('\n'))
-    .join('\n\n')
+  const normalizedAnnotations = normalizeAnnotationInputs(options?.annotations)
+  const filteredLogs = options?.jobId
+    ? normalizedLogs.filter((log) => log.jobId === options.jobId)
+    : normalizedLogs
+  const selectedStepLog = options?.stepLog ? normalizeText(options.stepLog) : ''
+  const joinedLogText = selectedStepLog
+    ? [
+      `# ${options?.jobName || 'Selected job'} > ${options?.stepName || 'Selected step'}`,
+      selectedStepLog,
+    ].join('\n')
+    : (filteredLogs.length > 0 ? filteredLogs : normalizedLogs)
+      .map((log) => [`# ${log.name}`, log.content].join('\n'))
+      .join('\n\n')
 
-  const draft = matchSuggestionRule(joinedLogText, jobs)
-  const relatedJobs = buildRelatedJobs(jobs)
+  const draft =
+    normalizedAnnotations.length > 0
+      ? buildCheckovAnnotationDraft(options?.jobName, normalizedAnnotations)
+      : matchSuggestionRule(joinedLogText, jobs)
+  draft.candidateFiles = uniqueByPath([
+    ...detectCandidateFilesFromStepLog(selectedStepLog),
+    ...draft.candidateFiles,
+  ])
+  const relatedJobs = options?.jobId
+    ? jobs
+      .filter((job) => job.id === options.jobId)
+      .map((job) => ({
+        jobId: job.id,
+        name: job.name,
+        failedSteps: collectFailedSteps(job),
+      }))
+    : buildRelatedJobs(jobs)
   const ruleMessage = buildMessage(draft)
+  const stepContext = options?.stepName
+    ? [
+      '[선택된 분석 대상]',
+      `- Job: ${options.jobName || 'unknown'}`,
+      `- Step: ${options.stepName}`,
+      options.stepNumber != null ? `- Step number: ${options.stepNumber}` : null,
+      options.stepStatus ? `- Step status: ${options.stepStatus}` : null,
+    ]
+      .filter((value): value is string => !!value)
+      .join('\n')
+    : ''
 
   const hasFailure = jobs.some((job) => job.conclusion === 'failure')
+  const shouldAttemptLlm = hasFailure || normalizedAnnotations.length > 0 || selectedStepLog.length > 0
+  const annotationSummaryText =
+    normalizedAnnotations.length > 0
+      ? [
+        '[Checkov 실패 요약]',
+        ...normalizedAnnotations.map((annotation) => {
+          const title = annotation.title || 'Untitled check'
+          const message = annotation.message || 'No message'
+          const countText = annotation.count && annotation.count > 1 ? ` (${annotation.count}건)` : ''
+          const pathText = annotation.path ? ` - ${annotation.path}` : ''
+          return `- ${title}: ${message}${countText}${pathText}`
+        }),
+      ].join('\n')
+      : ''
 
   let llmAnalysis: string | undefined
   let suggestedFiles: SuggestedFile[] | undefined
+  let llmError: string | undefined
 
-  if (hasFailure) {
+  if (shouldAttemptLlm) {
     const terraformContext = await fetchTerraformContext(draft.candidateFiles)
-    const llmResult = await callLlmAnalysis(joinedLogText, ruleMessage, terraformContext)
+    const llmResult = await callLlmAnalysis(joinedLogText, ruleMessage, annotationSummaryText, stepContext, terraformContext)
     llmAnalysis = llmResult.analysis || undefined
     suggestedFiles = llmResult.suggestedFiles.length > 0 ? llmResult.suggestedFiles : undefined
+    llmError = llmResult.error || undefined
   }
+
+  const llmStatus: LlmStatus = !shouldAttemptLlm ? 'not_attempted' : llmAnalysis ? 'success' : 'failed'
 
   return {
     ok: true,
@@ -442,6 +604,8 @@ export async function generateFixSuggestion(runId: string): Promise<FixSuggestio
     message: ruleMessage,
     mode: llmAnalysis ? 'hybrid' : 'rule-based',
     configuredModel: env.llmModel,
+    llmStatus,
+    llmError,
     summary: draft.summary,
     rootCause: draft.rootCause,
     riskLevel: draft.riskLevel,

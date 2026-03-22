@@ -14,6 +14,9 @@ interface StepInfo {
 
 interface StepTimelineProps {
   steps: StepInfo[]
+  activeStepNumber?: number | null
+  onStepClick?: (step: StepInfo) => void
+  stepDomIdPrefix?: string
 }
 
 function formatSeconds(seconds: number | null | undefined): string {
@@ -54,14 +57,8 @@ function getStepHighlight(status: string, conclusion: string | null): string {
   return 'bg-white border-gray-100'
 }
 
-export default function StepTimeline({ steps }: StepTimelineProps) {
+export default function StepTimeline({ steps, activeStepNumber, onStepClick, stepDomIdPrefix }: StepTimelineProps) {
   if (steps.length === 0) return null
-
-  // Filter out "Set up job" and "Complete job" wrapper steps for cleaner display
-  const meaningful = steps.filter(
-    (s) => !/^(Set up job|Complete job|Post .*)$/i.test(s.name),
-  )
-  const displaySteps = meaningful.length > 0 ? meaningful : steps
 
   return (
     <div className="px-4 py-3">
@@ -69,12 +66,47 @@ export default function StepTimeline({ steps }: StepTimelineProps) {
         단계별 진행
       </p>
       <div className="relative">
-        {displaySteps.map((step, index) => {
+        {steps.map((step, index) => {
           const duration = step.durationSeconds != null
             ? formatSeconds(step.durationSeconds)
             : step.startedAt
               ? formatSeconds(computeDuration(step.startedAt, step.completedAt))
               : ''
+          const active = activeStepNumber === step.number
+          const cardClass = cn(
+            'mb-2 flex-1 rounded-lg border px-3 py-2 text-left transition-colors',
+            getStepHighlight(step.status, step.conclusion),
+            onStepClick && 'cursor-pointer hover:border-indigo-200 hover:bg-indigo-50/60',
+            active && 'border-indigo-300 bg-indigo-50 ring-1 ring-indigo-100',
+          )
+          const cardId = stepDomIdPrefix ? `${stepDomIdPrefix}-${step.number}` : undefined
+          const content = (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={cn(
+                    'text-sm font-medium',
+                    step.conclusion === 'failure' ? 'text-red-700' : 'text-gray-800',
+                  )}
+                >
+                  {step.name}
+                </span>
+                {duration && (
+                  <span className="shrink-0 text-xs text-gray-400">{duration}</span>
+                )}
+              </div>
+              {step.summary && (
+                <p
+                  className={cn(
+                    'mt-1 text-xs leading-relaxed',
+                    step.conclusion === 'failure' ? 'text-red-600' : 'text-gray-500',
+                  )}
+                >
+                  {step.summary}
+                </p>
+              )}
+            </>
+          )
 
           return (
             <div key={`step-${step.number}`} className="flex gap-3">
@@ -83,7 +115,7 @@ export default function StepTimeline({ steps }: StepTimelineProps) {
                 <div className="flex h-7 items-center">
                   {getStepIcon(step.status, step.conclusion)}
                 </div>
-                {index < displaySteps.length - 1 && (
+                {index < steps.length - 1 && (
                   <div
                     className={cn('w-0.5 flex-1 min-h-[16px]', getLineColor(step.status, step.conclusion))}
                   />
@@ -91,36 +123,15 @@ export default function StepTimeline({ steps }: StepTimelineProps) {
               </div>
 
               {/* Step content */}
-              <div
-                className={cn(
-                  'mb-2 flex-1 rounded-lg border px-3 py-2 transition-colors',
-                  getStepHighlight(step.status, step.conclusion),
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      'text-sm font-medium',
-                      step.conclusion === 'failure' ? 'text-red-700' : 'text-gray-800',
-                    )}
-                  >
-                    {step.name}
-                  </span>
-                  {duration && (
-                    <span className="shrink-0 text-xs text-gray-400">{duration}</span>
-                  )}
+              {onStepClick ? (
+                <button id={cardId} type="button" className={cardClass} onClick={() => onStepClick(step)}>
+                  {content}
+                </button>
+              ) : (
+                <div id={cardId} className={cardClass}>
+                  {content}
                 </div>
-                {step.summary && (
-                  <p
-                    className={cn(
-                      'mt-1 text-xs leading-relaxed',
-                      step.conclusion === 'failure' ? 'text-red-600' : 'text-gray-500',
-                    )}
-                  >
-                    {step.summary}
-                  </p>
-                )}
-              </div>
+              )}
             </div>
           )
         })}

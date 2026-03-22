@@ -5,10 +5,7 @@ import {
   calcPercentile,
   type MetricSample,
 } from '@/lib/parsePrometheus'
-
-const METRICS_URL =
-  (import.meta.env.VITE_METRICS_URL as string) ||
-  'http://devsecops-dev-alb-1703008071.ap-northeast-2.elb.amazonaws.com/api/metrics'
+import { METRICS_URL } from '@/lib/env'
 
 const POLL_INTERVAL = 15_000 // 15초
 const HISTORY_SIZE = 30     // 최대 30개 스냅샷
