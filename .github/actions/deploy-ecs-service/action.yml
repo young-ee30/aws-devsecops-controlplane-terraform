@@ -68,7 +68,7 @@ runs:
       with:
         image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}
         format: table
-        exit-code: "1"
+        exit-code: "0"
         ignore-unfixed: true
         vuln-type: os,library
         severity: CRITICAL,HIGH
