@@ -14,14 +14,14 @@ ecr_repositories = [
   "frontend"
 ]
 
-active_backend = "api-python"
+active_backend = "api-node"
 
 services = {
   api-node = {
     cpu            = 256
     memory         = 512
     container_port = 5000
-    desired_count  = 0
+    desired_count  = 1
     image          = "282146511585.dkr.ecr.ap-northeast-2.amazonaws.com/devsecops-dev/api-node:dev-20260314-220146"
     environment = {
       NODE_ENV = "development"
