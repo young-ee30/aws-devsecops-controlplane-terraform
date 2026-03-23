@@ -5,6 +5,8 @@ import CicdPage from './pages/CicdPage'
 import PolicyPage from './pages/PolicyPage'
 import GithubInstalledPage from './pages/GithubInstalledPage'
 import GithubCallbackPage from './pages/GithubCallbackPage'
+import IncidentGwanjePage from './pages/IncidentGwanjePage'
+import IncidentHaePage from './pages/IncidentHaePage'
 
 function App() {
   return (
@@ -16,6 +18,8 @@ function App() {
         <Route path="cicd" element={<CicdPage />} />
         <Route path="git-actions" element={<GitActionsPage />} />
         <Route path="policy" element={<PolicyPage />} />
+        <Route path="incident/gwanje" element={<IncidentGwanjePage />} />
+        <Route path="incident/hae" element={<IncidentHaePage />} />
       </Route>
     </Routes>
   )

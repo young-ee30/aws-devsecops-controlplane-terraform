@@ -5,6 +5,8 @@ import {
   PanelLeftClose,
   ScrollText,
   Server,
+  MonitorCheck,
+  ShieldAlert,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -22,7 +24,10 @@ const securityOpsItems: NavItem[] = [
 ]
 
 /** 인프라 · 관측 (하단 그룹, 위와 간격 분리) */
-const infraItems: NavItem[] = []
+const infraItems: NavItem[] = [
+  { label: '관제', path: '/incident/gwanje', icon: MonitorCheck },
+  { label: '침해', path: '/incident/hae', icon: ShieldAlert },
+]
 
 function NavMenuLink({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
   return (
