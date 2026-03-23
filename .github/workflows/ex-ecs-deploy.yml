@@ -229,7 +229,6 @@ jobs:
         with:
           aws_region: ${{ env.AWS_REGION }}
           aws_role_arn: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
           image_tag: ${{ needs.resolve-targets.outputs.head_sha }}
           app_path: ${{ steps.config.outputs.app_path }}
           ecr_repository: ${{ steps.config.outputs.ecr_repository }}
