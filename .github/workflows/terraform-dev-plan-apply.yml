@@ -108,7 +108,7 @@ jobs:
 
       - name: Checkov IaC Scan
         id: checkov
-        uses: bridgecrewio/checkov-action@master
+        uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf
         continue-on-error: true
         with:
           directory: terraform/

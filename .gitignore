@@ -177,3 +177,22 @@ override.tf.json
 # backend.hcl: 버킷 이름이 담긴 파일, setup.sh가 자동 생성 (커밋 금지)
 backend.hcl
 *.tflock
+
+# Terraform local variable files
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+
+# Local app runtime artifacts
+**/data/*.db
+**/data/*.db-*
+**/.data/*.db
+**/.data/*.db-*
+*.mv.db
+*.lock.db
+**/uploads/*
+!**/uploads/.gitkeep
+
+# Backup files
+*.orig
