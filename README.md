@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="controlplane/web/public/icon.svg" alt="AWS Security Project" width="88" />
+  <img src="controlplane/web/public/icon.svg" alt="aws-devsecops-controlplane-terraform" width="88" />
 </p>
 
 <h1 align="center">AWS Security Project</h1>
